@@ -17,9 +17,13 @@ struct PageContext {
     var windowHeight: CGFloat = 0
     /// The page's side margin: `T.gutter`, or `T.splitGutter` for the page beside the split list.
     var gutter: CGFloat = T.gutter
+    /// `T.splitEnd` beside the split list.
+    var end: CGFloat = 0
     var toggleSidebar: () -> Void = {}
 
     var cssWidth: CGFloat { pageWidth / T.scale }
+    var tableLeading: CGFloat { sidebarUnder + gutter - T.gutter }
+    var tableTrailing: CGFloat { gutter - T.gutter + end + dockUnder }
     var shelfFade: CGFloat { dockUnder > 0 ? T.shelfFade : 0 }
     var shelfGap: CGFloat { dockUnder > 0 ? T.shelfGap : 0 }
 }

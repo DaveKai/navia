@@ -38,7 +38,7 @@ struct SplitView<List: View, Detail: View>: View {
                 .padding(.top, top)
                 .padding(.leading, ctx.sidebarUnder + T.gutter)
             }
-            // The page keeps `T.splitEnd` at its right itself.
+            // The page keeps `ctx.end` at its right itself.
             detail
                 .frame(maxWidth: .infinity)
                 .environment(\.pageContext, beside(ctx, stacked: stacked))
@@ -48,6 +48,7 @@ struct SplitView<List: View, Detail: View>: View {
     private func beside(_ page: PageContext, stacked: Bool) -> PageContext {
         var context = page
         context.gutter = T.splitGutter
+        context.end = T.splitEnd
         let list = stacked ? T.splitEnd : T.gutter + T.splitListW + T.splitEnd
         if !stacked {
             context.sidebarUnder = 0

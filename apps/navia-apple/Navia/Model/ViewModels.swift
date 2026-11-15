@@ -363,6 +363,7 @@ protocol AlbumsViewModel: AnyObject, Observable {
     var sort: AlbumSort { get set }
     var genre: String? { get set }
     func album(at index: Int) -> AlbumRow?
+    func listedAlbumsSongs() -> any SongsViewModel
 }
 
 protocol ArtistsViewModel: AnyObject, Observable {

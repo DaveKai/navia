@@ -103,10 +103,8 @@ struct AlbumsPage: View {
     }
 
     private func allSongs(_ albums: any AlbumsViewModel) -> some View {
-        let songs = holderAllSongs
+        let songs = albums.listedAlbumsSongs()
         return SongsTable(songs: songs, shell: shell, revision: songs.revision, editRevision: songs.editRevision, nowPlayingID: shell.player.current?.id,
-                          leadingInset: ctx.sidebarUnder + T.splitGutter - T.gutter, trailingInset: T.splitGutter - T.gutter + T.splitEnd + ctx.dockUnder, bottomInset: PagePadding.bottom(hasBar: ctx.hasBar))
+                          bottomInset: PagePadding.bottom(hasBar: ctx.hasBar))
     }
-
-    private var holderAllSongs: any SongsViewModel { shell.songs }
 }

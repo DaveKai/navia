@@ -29,11 +29,10 @@ struct AlbumDetail: View {
 
     var body: some View {
         let songs = holder.get { shell.library.songs(forAlbum: album.id) }
-        let gutter = embedded ? T.splitGutter : T.gutter
         // Decided here, where the page context is known, because the table measures the header in its own host.
         let header = AlbumHeader(shell: shell, album: album, songs: songs, embedded: embedded, stacked: ctx.cssWidth <= 620, searchWidth: pillSearchWidth(ctx), blurbOpen: $blurbOpen)
-            .padding(.leading, ctx.sidebarUnder + gutter)
-            .padding(.trailing, (embedded ? T.splitEnd : 0) + gutter + ctx.dockUnder)
+            .padding(.leading, ctx.sidebarUnder + ctx.gutter)
+            .padding(.trailing, ctx.end + ctx.gutter + ctx.dockUnder)
             .padding(.top, PagePadding.top)
             .padding(.bottom, T.px(32))
         let hosted = header.background(alignment: .top) { if !embedded { PageTint(hex: album.tintHex ?? "2a2b33") } }
@@ -50,8 +49,6 @@ struct AlbumDetail: View {
             } else {
                 SongsTable(songs: songs, shell: shell, revision: songs.revision, editRevision: songs.editRevision,
                            nowPlayingID: shell.player.current?.id, variant: .album, pageHeader: AnyView(hosted),
-                           leadingInset: ctx.sidebarUnder + gutter - T.gutter,
-                           trailingInset: (embedded ? gutter - T.gutter + T.splitEnd : 0) + ctx.dockUnder,
                            bottomInset: PagePadding.bottom(hasBar: ctx.hasBar), discs: discs(songs),
                            trailing: shell.library.moreBy(album: album).map { .section(AnyView(moreBy($0))) })
             }
@@ -78,7 +75,7 @@ extension AlbumDetail {
         }
         .padding(.top, T.sectionGap)
         .padding(.leading, ctx.sidebarUnder)
-        .padding(.trailing, (embedded ? T.splitEnd : 0) + ctx.dockUnder)
+        .padding(.trailing, ctx.end + ctx.dockUnder)
         .environment(\.pageContext, ctx)
         .foregroundStyle(T.t1.color)
     }

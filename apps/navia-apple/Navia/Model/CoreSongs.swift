@@ -198,6 +198,7 @@ import Observation
     @ObservationIgnored private let cache: RowCache<AlbumRow>
     @ObservationIgnored private var order: [UInt32] = []
     @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var listSongs: LocalSongsModel?
 
     private(set) var count = 0
     private(set) var totalSongs = 0
@@ -250,6 +251,28 @@ import Observation
                 self.count = rowids.count
                 self.totalSongs = totalSongs
                 self.revision &+= 1
+                self.loadSongs()
+            }
+        }
+    }
+
+    func listedAlbumsSongs() -> any SongsViewModel {
+        if let listSongs { return listSongs }
+        let model = library.localSongs()
+        listSongs = model
+        loadSongs()
+        return model
+    }
+
+    private func loadSongs() {
+        guard let model = listSongs, let core else { return }
+        let (rowids, generation) = (order, generation)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let albums = Dictionary(core.albumsByRowid(rowids: rowids).map { ($0.rowid ?? 0, $0.id) }, uniquingKeysWith: { a, _ in a })
+            let rows = rowids.compactMap { albums[$0] }.flatMap { core.albumSongs(albumId: $0).map { SongRow(core: $0) } }
+            await MainActor.run {
+                guard let self, generation == self.generation else { return }
+                model.setRows(rows)
             }
         }
     }

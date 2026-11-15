@@ -165,7 +165,7 @@ struct ArtistDetail: View {
                 EmptyStateView(symbol: "music.microphone", title: L("Nothing here yet"), hint: L("The server has no songs or albums for this artist."), compact: true)
             }
         }
-        .padding(.trailing, embedded ? T.splitEnd : 0)
+        .padding(.trailing, ctx.end)
     }
 
     private static func latest(_ parts: [DiscographyPart]) -> AlbumRow? {

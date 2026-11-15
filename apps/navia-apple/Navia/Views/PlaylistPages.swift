@@ -154,7 +154,7 @@ struct PlaylistPage: View {
                     let suggest = suggestions(p, songs)
                     SongsTable(songs: songs, shell: shell, revision: songs.revision, editRevision: songs.editRevision,
                                nowPlayingID: shell.player.current?.id, pageHeader: AnyView(header),
-                               leadingInset: ctx.sidebarUnder, trailingInset: ctx.dockUnder, bottomInset: PagePadding.bottom(hasBar: ctx.hasBar),
+                               bottomInset: PagePadding.bottom(hasBar: ctx.hasBar),
                                sort: songs.sort, descending: songs.descending, reorder: reorder(p, songs), remove: remove(p, songs),
                                trailing: suggest.flatMap { trailing(p, $0, songs) }, nearEnd: suggest.map { model in { model.nearView(shell: shell) } })
                 }

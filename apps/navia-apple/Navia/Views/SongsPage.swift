@@ -48,7 +48,7 @@ struct SongsPage: View {
                 } else if !isSnapshot {
                     SongsTable(songs: songs, shell: shell, revision: songs.revision, editRevision: songs.editRevision,
                                nowPlayingID: shell.player.current?.id, compact: shell.compactRows, pageHeader: row.map { AnyView($0) },
-                               leadingInset: ctx.sidebarUnder, trailingInset: ctx.dockUnder, bottomInset: PagePadding.bottom(hasBar: ctx.hasBar), sort: songs.sort, descending: songs.descending)
+                               bottomInset: PagePadding.bottom(hasBar: ctx.hasBar), sort: songs.sort, descending: songs.descending)
                 } else {
                     Color.clear
                 }

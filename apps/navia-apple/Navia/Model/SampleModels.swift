@@ -321,9 +321,12 @@ import NaviaCoreFFI
     }
 
     func songs(forAlbum id: String) -> any SongsViewModel {
+        LocalSongsModel(rows: tracks(forAlbum: id), collection: collection, defaultSort: .order)
+    }
+
+    func tracks(forAlbum id: String) -> [SongRow] {
         let album = albumsByID[base(id)]
-        let tracks = (album?.tracks.isEmpty == false ? album!.tracks : songsByAlbum[base(id)] ?? [])
-        return LocalSongsModel(rows: tracks, collection: collection, defaultSort: .order)
+        return album?.tracks.isEmpty == false ? album!.tracks : songsByAlbum[base(id)] ?? []
     }
 
     func songs(forPlaylist id: String) -> any SongsViewModel {
@@ -492,6 +495,7 @@ import NaviaCoreFFI
     @ObservationIgnored private let plays: [String: Int]
     @ObservationIgnored private let collection: LocalCollection
     private var visible: [AlbumRow] = []
+    @ObservationIgnored private var listSongs: LocalSongsModel?
 
     private(set) var count = 0
     private(set) var totalSongs = 0
@@ -524,6 +528,16 @@ import NaviaCoreFFI
         count = found.count
         totalSongs = found.reduce(0) { $0 + $1.songCount }
         revision &+= 1
+        listSongs?.setRows(listedTracks)
+    }
+
+    private var listedTracks: [SongRow] { visible.flatMap { library.tracks(forAlbum: $0.id) } }
+
+    func listedAlbumsSongs() -> any SongsViewModel {
+        if let listSongs { return listSongs }
+        let model = LocalSongsModel(rows: listedTracks, collection: collection, defaultSort: .order)
+        listSongs = model
+        return model
     }
 
     private func baseID(_ id: String) -> String { String(id.prefix { $0 != "-" }) }

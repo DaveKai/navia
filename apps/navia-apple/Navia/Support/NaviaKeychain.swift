@@ -10,10 +10,10 @@ import Security
 nonisolated enum NaviaKeychain {
     static let service = Bundle.main.bundleIdentifier ?? "com.davekai.Navia"
 
-    /// An account still kept under the previous bundle id is treated like a legacy item.
+    /// An account still kept under the previous bundle id is treated like a legacy item; check builds leave them alone.
     private static func older(_ account: String, _ legacy: Legacy?) -> [Legacy] {
-        let previous = service == BundleMove.previousID ? nil : Legacy(service: BundleMove.previousID, account: account)
-        return [previous, legacy].compactMap { $0 }
+        guard !service.hasPrefix(BundleMove.previousID) else { return [] }
+        return [Legacy(service: BundleMove.previousID, account: account), legacy].compactMap { $0 }
     }
 
     /// Where a secret was kept before the shared service.

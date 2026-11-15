@@ -535,10 +535,15 @@ private nonisolated final class DownloadEvents: DownloadListener, @unchecked Sen
         }
     }
 
-    func songs(forAlbum id: String) -> any SongsViewModel {
-        let model = LocalSongsModel(rows: [], collection: collection, defaultSort: .order)
+    func localSongs(defaultSort: SongSort = .order) -> LocalSongsModel {
+        let model = LocalSongsModel(rows: [], collection: collection, defaultSort: defaultSort)
         model.downloader = { [weak self] songs, on in self?.setDownloaded(songs: songs, on) }
         model.toggle = { [weak self] id in self?.toggleStar(song: id) }
+        return model
+    }
+
+    func songs(forAlbum id: String) -> any SongsViewModel {
+        let model = localSongs()
         guard let core else { return model }
         Task.detached(priority: .userInitiated) {
             let rows = core.albumSongs(albumId: id).map { SongRow(core: $0) }
@@ -548,9 +553,7 @@ private nonisolated final class DownloadEvents: DownloadListener, @unchecked Sen
     }
 
     func songs(forPlaylist id: String) -> any SongsViewModel {
-        let model = LocalSongsModel(rows: [], collection: collection, defaultSort: .order)
-        model.downloader = { [weak self] songs, on in self?.setDownloaded(songs: songs, on) }
-        model.toggle = { [weak self] id in self?.toggleStar(song: id) }
+        let model = localSongs()
         guard let core else { return model }
         Task.detached(priority: .userInitiated) { [weak self] in
             let stored = core.playlistSongs(id: id).map { SongRow(core: $0) }
@@ -579,9 +582,7 @@ private nonisolated final class DownloadEvents: DownloadListener, @unchecked Sen
     }
 
     func likedSongs() -> any SongsViewModel {
-        let model = LocalSongsModel(rows: [], collection: collection, defaultSort: .liked)
-        model.downloader = { [weak self] songs, on in self?.setDownloaded(songs: songs, on) }
-        model.toggle = { [weak self] id in self?.toggleStar(song: id) }
+        let model = localSongs(defaultSort: .liked)
         guard let core else { return model }
         model.followFavorites { ids in core.songsById(ids: ids).map { SongRow(core: $0) } }
         return model

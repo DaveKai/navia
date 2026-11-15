@@ -125,9 +125,8 @@ struct SongsTable: NSViewRepresentable {
     var variant: SongListVariant = .full
     var compact = false
     var pageHeader: AnyView? = nil
-    /// Rows stay beside the sidebar and dock, but the scroll view reaches under them so tints do too.
-    var leadingInset: CGFloat = 0
-    var trailingInset: CGFloat = 0
+    /// Read here, not passed in, so a table beside the split list gets the split's context rather than the page's.
+    @Environment(\.pageContext) private var ctx
     var bottomInset: CGFloat = T.px(48)
     /// The list's sort, so its column header is emphasized. Orders with no column emphasize none.
     var sort: SongSort? = nil
@@ -154,7 +153,7 @@ struct SongsTable: NSViewRepresentable {
         context.coordinator.update(songs: songs, shell: shell, revision: revision, editRevision: editRevision, nowPlayingID: nowPlayingID,
                                    colors: TableColors(accent: shell.theme.accent, accentSoft: shell.theme.accentSoft, onAccent: shell.theme.onAccent),
                                    variant: variant, compact: compact, offline: shell.library.isOffline, pageHeader: pageHeader,
-                                   leadingInset: leadingInset, trailingInset: trailingInset, bottomInset: bottomInset, discs: discs)
+                                   leadingInset: ctx.tableLeading, trailingInset: ctx.tableTrailing, bottomInset: bottomInset, discs: discs)
         context.coordinator.setSort(sort, descending: descending)
         context.coordinator.setReorder(reorder)
         context.coordinator.remove = remove
