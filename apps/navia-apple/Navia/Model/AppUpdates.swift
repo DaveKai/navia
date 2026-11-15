@@ -1,12 +1,14 @@
+import AppKit
 import Foundation
+import NaviaCoreFFI
 import Observation
 
-/// Settings > About and Check for Updates. The Mac updater needs Developer ID signing and notarization, so until
-/// then no feed is set and a check says so without any network call.
+/// Settings > About and Check for Updates. Until the Mac has Developer ID signing and its own updater, a check asks
+/// GitHub for the latest release and Download opens its page.
 @MainActor @Observable final class AppUpdates {
     static let shared = AppUpdates()
 
-    enum Status: Equatable { case idle, checking, upToDate, ready, notConfigured }
+    enum Status: Equatable { case idle, checking, upToDate, available(version: String, url: String), failed }
 
     private(set) var status: Status = .idle
 
@@ -15,12 +17,14 @@ import Observation
         didSet { UserDefaults.standard.set(checkAutomatically, forKey: "checkUpdates") }
     }
 
+    private var automaticChecks: Task<Void, Never>?
+
     private init() {
         checkAutomatically = UserDefaults.standard.object(forKey: "checkUpdates") as? Bool ?? true
     }
 
     /// "0.1.0+543 (f6e8534)" for a test build, "0.1.0" for a release. The version is stamped from the workspace
-    /// Cargo.toml by scripts/mac.sh, and the commit from `NaviaCommit`, empty for a release.
+    /// Cargo.toml by `tools/version.sh xcode`, and the commit from `NaviaCommit`, empty for a release.
     static var versionLabel: String {
         let info = Bundle.main.infoDictionary ?? [:]
         let version = info["CFBundleShortVersionString"] as? String ?? "?"
@@ -41,14 +45,64 @@ import Observation
         switch status {
         case .idle: nil
         case .checking: L("Checking…")
-        case .upToDate: L("Up to date")
-        case .ready: L("A new version is ready.")
-        case .notConfigured: L("Updates aren't set up for this build")
+        case .upToDate: L("Navia is up to date")
+        case .available(let version, _): L("Navia {version} is available", ["version": version])
+        case .failed: L("Couldn't check for updates")
         }
     }
 
-    /// No feed yet: says so.
+    var buttonTitle: String {
+        switch status {
+        case .checking: L("Checking…")
+        case .available: L("Download")
+        default: L("Check for Updates")
+        }
+    }
+
+    /// Checks, or opens the newer release's page.
     func check() {
-        status = .notConfigured
+        switch status {
+        case .checking: return
+        case .available(_, let url):
+            if let link = URL(string: url) { NSWorkspace.shared.open(link) }
+        default:
+            run(automatic: false)
+        }
+    }
+
+    /// At launch and then every few hours, never in test runs, sample mode or the developer override.
+    func startAutomaticChecks() {
+        guard automaticChecks == nil, automaticUpdateCheckAllowed(testRun: CoreMode.isTestRun || CoreMode.useSample) else { return }
+        let interval = Duration.seconds(Int64(updateCheckIntervalSecs()))
+        automaticChecks = Task {
+            while !Task.isCancelled {
+                if checkAutomatically, status != .checking { run(automatic: true) }
+                try? await Task.sleep(for: interval)
+            }
+        }
+    }
+
+    /// An automatic check stays quiet unless it finds a newer release than the one shown.
+    private func run(automatic: Bool) {
+        if !automatic { status = .checking }
+        let running = Self.versionForAgent
+        Task.detached(priority: .utility) {
+            let answer = checkLatestRelease(runningVersion: running)
+            await MainActor.run { self.finish(answer, automatic: automatic) }
+        }
+    }
+
+    private func finish(_ answer: ReleaseCheckRow, automatic: Bool) {
+        let next: Status
+        switch answer {
+        case .upToDate: next = .upToDate
+        case .available(let version, let url): next = .available(version: version, url: url)
+        case .failed: next = .failed
+        }
+        if !automatic {
+            status = next
+        } else if case .available = next, status != next, status != .checking {
+            status = next
+        }
     }
 }

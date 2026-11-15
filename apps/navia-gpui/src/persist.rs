@@ -101,7 +101,7 @@ pub struct Prefs {
     /// Keep playing in the tray when the window closes, the default, or quit. Without a tray host,
     /// closing always quits.
     pub close_to_tray: bool,
-    /// Check for updates automatically, on Windows. On by default.
+    /// Check for updates automatically. On by default.
     pub check_updates: bool,
     /// Albums and Artists show the split view instead of the grid.
     pub album_split: bool,

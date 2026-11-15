@@ -512,7 +512,7 @@ impl Shell {
     pub fn new(prefs: Prefs, support: chrome::Support, cx: &mut App) -> Entity<Self> {
         cx.new(|cx| {
             let mut shell = Self::build(prefs, support, cx);
-            shell.check_updates_at_launch(cx);
+            shell.start_update_checks(cx);
             shell
         })
     }

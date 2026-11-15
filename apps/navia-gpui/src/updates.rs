@@ -1,10 +1,8 @@
-//! The version and, on Windows, in-app updates through Velopack. On Linux the package manager
-//! updates Navia.
-//!
-//! The feed is set at build time with `NAVIA_UPDATE_FEED`, a Velopack HTTP feed. Without one,
-//! a check reports that updates aren't set up and never touches the network.
+//! The version and updates. Windows updates through Velopack from the feed set at build time with
+//! `NAVIA_UPDATE_FEED`; without one, a check reports that updates aren't set up. Linux packages
+//! update Navia, so a check there only looks for a newer GitHub release and links to it.
 
-use crate::i18n::tr;
+use crate::i18n::{tr, trf};
 
 /// The version shown in Settings. A test build shows "0.1.0+543 (f6e8534)", the installer
 /// version and commit. A release shows "0.1.0". See build.rs and tools/version.sh.
@@ -17,9 +15,6 @@ pub fn version_label() -> String {
     }
 }
 
-/// Whether this build has an in-app updater at all.
-pub const HAS_UPDATER: bool = cfg!(target_os = "windows");
-
 /// The update feed this build was made with, if any.
 pub fn feed() -> Option<&'static str> {
     option_env!("NAVIA_UPDATE_FEED").filter(|feed| !feed.is_empty())
@@ -30,6 +25,8 @@ pub enum UpdateStatus {
     Idle,
     Checking,
     UpToDate,
+    /// A newer GitHub release, opened in the browser.
+    Available { version: String, url: String },
     /// Downloaded, and applied by restarting.
     Ready,
     NotConfigured,
@@ -44,7 +41,8 @@ impl UpdateStatus {
         match self {
             UpdateStatus::Idle => None,
             UpdateStatus::Checking => Some(tr("Checking…").to_string()),
-            UpdateStatus::UpToDate => Some(tr("Up to date").to_string()),
+            UpdateStatus::UpToDate => Some(tr("Navia is up to date").to_string()),
+            UpdateStatus::Available { version, .. } => Some(trf("Navia {version} is available", &[("version", version)])),
             UpdateStatus::Ready => Some(tr("A new version is ready.").to_string()),
             UpdateStatus::NotConfigured => Some(tr("Updates aren't set up for this build").to_string()),
             UpdateStatus::NotInstalled => Some(tr("Only an installed Navia can update itself.").to_string()),
@@ -53,10 +51,25 @@ impl UpdateStatus {
     }
 }
 
-/// Checks the feed and downloads a newer version. Blocks, so run it off the UI thread.
+/// Checks for a newer version, and on Windows downloads it. Blocks, so run it off the UI thread.
 pub fn check_and_download() -> UpdateStatus {
-    let Some(feed) = feed() else { return UpdateStatus::NotConfigured };
-    imp::check_and_download(feed)
+    if cfg!(target_os = "windows") {
+        let Some(feed) = feed() else { return UpdateStatus::NotConfigured };
+        return imp::check_and_download(feed);
+    }
+    release_check()
+}
+
+fn release_check() -> UpdateStatus {
+    use navia_core::updates::{ReleaseCheck, check_latest_release};
+    match check_latest_release(env!("CARGO_PKG_VERSION")) {
+        Ok(ReleaseCheck::UpToDate) => UpdateStatus::UpToDate,
+        Ok(ReleaseCheck::Available { version, url }) => UpdateStatus::Available { version, url },
+        Err(error) => {
+            eprintln!("navia: update check failed: {error}");
+            UpdateStatus::Failed(tr("Couldn't check for updates").to_string())
+        }
+    }
 }
 
 /// Restarts into the downloaded version. Returns only if it couldn't.
@@ -131,18 +144,46 @@ pub fn run_installer_hooks() {
 }
 
 impl crate::shell::Shell {
-    /// Checks for updates once at launch when enabled. Only builds with an updater and a feed
-    /// ever make the network call.
-    pub fn check_updates_at_launch(&mut self, cx: &mut gpui::Context<Self>) {
-        if HAS_UPDATER && self.prefs.check_updates && feed().is_some() {
-            self.check_for_updates(cx);
+    /// Checks at launch and then every `UPDATE_CHECK_INTERVAL` while the setting is on.
+    pub fn start_update_checks(&mut self, cx: &mut gpui::Context<Self>) {
+        use navia_core::updates::{UPDATE_CHECK_INTERVAL, automatic_check_allowed};
+        if cfg!(target_os = "windows") {
+            if feed().is_none() {
+                return;
+            }
+            if self.prefs.check_updates {
+                self.check_for_updates(cx);
+            }
+        } else if automatic_check_allowed(self.sample_mode || crate::core_library::read_only_run()) {
+            self.automatic_update_check(cx);
+        } else {
+            return;
+        }
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(UPDATE_CHECK_INTERVAL).await;
+            if this.update(cx, |this, cx| this.automatic_update_check(cx)).is_err() {
+                return;
+            }
+        })
+        .detach();
+    }
+
+    /// Skipped while a downloaded update waits for a restart.
+    fn automatic_update_check(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.prefs.check_updates && !matches!(self.update_status, UpdateStatus::Checking | UpdateStatus::Ready) {
+            self.run_update_check(true, cx);
         }
     }
 
-    /// The Settings button. Checks and downloads off the UI thread, or restarts into a downloaded version.
+    /// The Settings button. Checks off the UI thread, opens a newer release's page, or restarts
+    /// into a downloaded version.
     pub fn check_for_updates(&mut self, cx: &mut gpui::Context<Self>) {
-        match self.update_status {
+        match &self.update_status {
             UpdateStatus::Checking => return,
+            UpdateStatus::Available { url, .. } => {
+                cx.open_url(url);
+                return;
+            }
             UpdateStatus::Ready => {
                 if let Some(error) = restart_to_update() {
                     self.update_status = UpdateStatus::Failed(error);
@@ -152,18 +193,28 @@ impl crate::shell::Shell {
             }
             _ => {}
         }
-        if feed().is_none() {
+        if cfg!(target_os = "windows") && feed().is_none() {
             self.update_status = UpdateStatus::NotConfigured;
             cx.notify();
             return;
         }
-        self.update_status = UpdateStatus::Checking;
-        cx.notify();
+        self.run_update_check(false, cx);
+    }
+
+    /// An automatic check stays quiet unless it finds a newer version than the one shown.
+    fn run_update_check(&mut self, automatic: bool, cx: &mut gpui::Context<Self>) {
+        if !automatic {
+            self.update_status = UpdateStatus::Checking;
+            cx.notify();
+        }
         let task = cx.background_executor().spawn(async { check_and_download() });
         cx.spawn(async move |this, cx| {
             let status = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.update_status = status;
+                let found = matches!(status, UpdateStatus::Available { .. } | UpdateStatus::Ready);
+                if !automatic || (found && this.update_status != status && this.update_status != UpdateStatus::Checking) {
+                    this.update_status = status;
+                }
                 cx.notify();
             });
         })

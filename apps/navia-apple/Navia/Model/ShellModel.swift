@@ -474,6 +474,7 @@ enum PlayerView: String { case lyrics, artwork, queue }
         AppTimeline.noteStart()
         // The User-Agent carries this build's version, so set it before any core or client exists.
         setAppVersion(version: AppUpdates.versionForAgent)
+        AppUpdates.shared.startAutomaticChecks()
         if CoreMode.useSample {
             let library = SampleLibrary()
             self.library = library
