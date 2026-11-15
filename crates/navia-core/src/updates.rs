@@ -8,9 +8,9 @@ use serde::Deserialize;
 
 use crate::{Error, Result};
 
-pub const LATEST_RELEASE_API: &str = "https://api.github.com/repos/DaveKai/navia/releases/latest";
+pub const LATEST_RELEASE_API: &str = "https://api.github.com/repos/davekai/navia/releases/latest";
 /// Opened when a release's own page link is missing or not https.
-pub const RELEASES_PAGE: &str = "https://github.com/DaveKai/navia/releases/latest";
+pub const RELEASES_PAGE: &str = "https://github.com/davekai/navia/releases/latest";
 /// The automatic check runs at launch and then this often.
 pub const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Forces the automatic check in runs that otherwise skip it (`NAVIA_CHECK_UPDATES=1`).
@@ -81,10 +81,10 @@ pub fn automatic_check_allowed(test_run: bool) -> bool {
 mod tests {
     use super::*;
 
-    const REPLY: &str = r#"{"url":"https://api.github.com/repos/DaveKai/navia/releases/1","html_url":"https://github.com/DaveKai/navia/releases/tag/v0.1.2","tag_name":"v0.1.2","name":"Navia 0.1.2","draft":false,"prerelease":false,"assets":[]}"#;
+    const REPLY: &str = r#"{"url":"https://api.github.com/repos/davekai/navia/releases/1","html_url":"https://github.com/davekai/navia/releases/tag/v0.1.2","tag_name":"v0.1.2","name":"Navia 0.1.2","draft":false,"prerelease":false,"assets":[]}"#;
 
     fn available() -> ReleaseCheck {
-        ReleaseCheck::Available { version: "0.1.2".into(), url: "https://github.com/DaveKai/navia/releases/tag/v0.1.2".into() }
+        ReleaseCheck::Available { version: "0.1.2".into(), url: "https://github.com/davekai/navia/releases/tag/v0.1.2".into() }
     }
 
     #[test]
@@ -123,14 +123,14 @@ mod tests {
         use wiremock::matchers::{header, method, path};
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(method("GET"))
-            .and(path("/repos/DaveKai/navia/releases/latest"))
+            .and(path("/repos/davekai/navia/releases/latest"))
             .and(header("user-agent", crate::client::user_agent().as_str()))
             .and(header("accept", "application/vnd.github+json"))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(REPLY))
             .expect(1)
             .mount(&server)
             .await;
-        let api = format!("{}/repos/DaveKai/navia/releases/latest", server.uri());
+        let api = format!("{}/repos/davekai/navia/releases/latest", server.uri());
         let found = tokio::task::spawn_blocking(move || check_release_at(&api, "0.1.1")).await.unwrap().unwrap();
         assert_eq!(found, available());
         let missing = format!("{}/nothing", server.uri());

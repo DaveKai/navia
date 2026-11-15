@@ -8,7 +8,7 @@ Version:        0.1.2
 Release:        1%{?dist}
 Summary:        Music player for Navidrome
 License:        GPL-3.0-or-later
-URL:            https://github.com/DaveKai/navia
+URL:            https://github.com/davekai/navia
 Source0:        %{url}/archive/refs/tags/v%{version}/%{name}-%{version}.tar.gz
 
 ExclusiveArch:  x86_64 aarch64
@@ -90,8 +90,8 @@ test "$(%{buildroot}%{_bindir}/%{name} --version)" = "%{name} %{version}"
 %{_datadir}/icons/hicolor/*/apps/%{app_id}.*
 
 %changelog
-* Sun Nov 15 2026 DaveKai - 0.1.2-1
+* Sun Nov 15 2026 davekai - 0.1.2-1
 - Navia 0.1.2
 
-* Sun Nov 15 2026 DaveKai - 0.1.1-1
+* Sun Nov 15 2026 davekai - 0.1.1-1
 - Package for COPR, built from source

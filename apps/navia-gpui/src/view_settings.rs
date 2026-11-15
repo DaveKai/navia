@@ -14,7 +14,7 @@ use crate::color::{hex_to_hue, hue_to_hex, is_hex, parse_hex};
 use crate::eq_model::OUTPUT_DEFAULT;
 
 /// Navia's license file in its repository, for Settings > About.
-pub const LICENSE_URL: &str = "https://github.com/DaveKai/navia/blob/main/LICENSE";
+pub const LICENSE_URL: &str = "https://github.com/davekai/navia/blob/main/LICENSE";
 
 /// The output pickers in Settings and the Equalizer, refreshed when devices change.
 pub const OUTPUT_SELECT: &str = "output-device";
