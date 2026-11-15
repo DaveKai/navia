@@ -53,6 +53,15 @@ Download the latest version from [Releases](../../releases).
 - **macOS**: `.dmg`, for Apple Silicon and Intel.
 - **Linux**: `.rpm`, `.pkg.tar.zst` (Arch) and `.deb`. Flatpak, AppImage and the AUR are coming soon.
 
+### Fedora
+
+Navia is in [COPR](https://copr.fedorainfracloud.org/coprs/davekai/navia/), so `dnf` keeps it up to date:
+
+```sh
+sudo dnf copr enable davekai/navia
+sudo dnf install navia
+```
+
 ## Build from source
 
 See [docs/building.md](docs/building.md).
