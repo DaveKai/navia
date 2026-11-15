@@ -341,6 +341,7 @@ impl Shell {
             // Navia resizes layer-shell surfaces itself. The desktop resizes windows from the card's grips.
             is_resizable: kind != MiniKind::Layer,
             window_min_size: Some(size(self.theme.s(MINI_W) + room * 2.0, self.theme.s(MINI_H) + room * 2.0)),
+            window_max_size: Some(size(self.theme.s(MINI_MAX) + room * 2.0, self.theme.s(MINI_MAX) + room * 2.0)),
             is_minimizable: kind == MiniKind::Window,
             display_id: self.mini.display,
             window_background: background,

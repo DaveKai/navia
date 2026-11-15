@@ -1,0 +1,132 @@
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -2681,6 +2681,9 @@
+     /// Window minimum size
+     pub window_min_size: Option<Size<Pixels>>,
+ 
++    /// Window maximum size, which the user can't resize past (Windows only)
++    pub window_max_size: Option<Size<Pixels>>,
++
+     /// Whether to use client or server-side decorations on X11 and Wayland.
+     /// The platform may ignore requests it cannot satisfy.
+     pub window_decorations: Option<WindowDecorations>,
+@@ -2756,6 +2759,9 @@
+ 
+     pub window_min_size: Option<Size<Pixels>>,
+ 
++    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
++    pub window_max_size: Option<Size<Pixels>>,
++
+     #[cfg(target_os = "macos")]
+     pub tabbing_identifier: Option<String>,
+ 
+@@ -2822,6 +2828,7 @@
+             icon: None,
+             app_id: None,
+             window_min_size: None,
++            window_max_size: None,
+             window_decorations: None,
+             tabbing_identifier: None,
+             use_display_p3: false,
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -1699,6 +1699,7 @@
+             window_background,
+             app_id,
+             window_min_size,
++            window_max_size,
+             window_decorations,
+             #[cfg_attr(
+                 not(any(target_os = "linux", target_os = "freebsd")),
+@@ -1730,6 +1731,7 @@
+                 show,
+                 display_id,
+                 window_min_size,
++                window_max_size,
+                 app_id: app_id.clone(),
+                 icon,
+                 #[cfg(target_os = "macos")]
+--- a/crates/gpui_windows/src/events.rs
++++ b/crates/gpui_windows/src/events.rs
+@@ -204,16 +204,26 @@
+     }
+ 
+     fn handle_get_min_max_info_msg(&self, lparam: LPARAM) -> Option<isize> {
+-        let min_size = self.state.min_size?;
++        let (min_size, max_size) = (self.state.min_size, self.state.max_size);
++        if min_size.is_none() && max_size.is_none() {
++            return None;
++        }
+         let scale_factor = self.state.scale_factor.get();
+         let boarder_offset = &self.state.border_offset;
++        let outer = |size: Size<Pixels>| POINT {
++            x: size.width.scale(scale_factor).as_f32().round() as i32 + boarder_offset.width_offset.get(),
++            y: size.height.scale(scale_factor).as_f32().round() as i32 + boarder_offset.height_offset.get(),
++        };
+ 
+         unsafe {
+             let minmax_info = &mut *(lparam.0 as *mut MINMAXINFO);
+-            minmax_info.ptMinTrackSize.x = min_size.width.scale(scale_factor).as_f32() as i32
+-                + boarder_offset.width_offset.get();
+-            minmax_info.ptMinTrackSize.y = min_size.height.scale(scale_factor).as_f32() as i32
+-                + boarder_offset.height_offset.get();
++            if let Some(min_size) = min_size {
++                minmax_info.ptMinTrackSize = outer(min_size);
++            }
++            if let Some(max_size) = max_size {
++                minmax_info.ptMaxTrackSize = outer(max_size);
++                minmax_info.ptMaxSize = outer(max_size);
++            }
+         }
+         Some(0)
+     }
+--- a/crates/gpui_windows/src/window.rs
++++ b/crates/gpui_windows/src/window.rs
+@@ -46,6 +46,7 @@
+     pub origin: Cell<Point<Pixels>>,
+     pub logical_size: Cell<Size<Pixels>>,
+     pub min_size: Option<Size<Pixels>>,
++    pub max_size: Option<Size<Pixels>>,
+     pub fullscreen_restore_bounds: Cell<Bounds<Pixels>>,
+     pub border_offset: WindowBorderOffset,
+     pub appearance: Cell<WindowAppearance>,
+@@ -120,6 +121,7 @@
+         cursor_visible: Arc<AtomicBool>,
+         display: WindowsDisplay,
+         min_size: Option<Size<Pixels>>,
++        max_size: Option<Size<Pixels>>,
+         appearance: WindowAppearance,
+         disable_direct_composition: bool,
+         invalidate_devices: Arc<AtomicBool>,
+@@ -169,6 +171,7 @@
+             scale_factor: Cell::new(scale_factor),
+             restore_from_minimized: Cell::new(restore_from_minimized),
+             min_size,
++            max_size,
+             callbacks,
+             frame_signal: Arc::new(PlatformFrameSignal::new()),
+             input_handler: Cell::new(input_handler),
+@@ -278,6 +281,7 @@
+             context.cursor_visible.clone(),
+             context.display,
+             context.min_size,
++            context.max_size,
+             context.appearance,
+             context.disable_direct_composition,
+             context.invalidate_devices.clone(),
+@@ -421,6 +425,7 @@
+     is_resizable: bool,
+     is_minimizable: bool,
+     min_size: Option<Size<Pixels>>,
++    max_size: Option<Size<Pixels>>,
+     executor: ForegroundExecutor,
+     current_cursor: Option<HCURSOR>,
+     cursor_visible: Arc<AtomicBool>,
+@@ -537,6 +542,7 @@
+             is_resizable: params.is_resizable,
+             is_minimizable: params.is_minimizable,
+             min_size: params.window_min_size,
++            max_size: params.window_max_size,
+             executor,
+             current_cursor,
+             cursor_visible,

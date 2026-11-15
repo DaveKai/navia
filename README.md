@@ -43,7 +43,7 @@
 Download the latest version from [Releases](../../releases).
 
 - **Windows**: installer, with automatic updates.
-- **macOS**: app bundle.
+- **macOS**: `.dmg`, for Apple Silicon and Intel.
 - **Linux**: `.rpm`, `.pkg.tar.zst` (Arch) and `.deb`. Flatpak, AppImage and the AUR are coming soon.
 
 ## Build from source

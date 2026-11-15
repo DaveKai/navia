@@ -24,7 +24,7 @@ impl Shell {
             self.mini_follow_window(gpui::size(view.width - room * 2.0, view.height - room * 2.0 - hint));
         }
         let large = self.mini_stacked();
-        let card = self.mini_card_size();
+        let card = if kind == MiniKind::Topmost && self.mini.surface.is_some() { window.viewport_size() } else { self.mini_card_size() };
         let radius = self.mini_radius();
         let origin = self.mini_card_origin(window);
         let card_box = Bounds { origin, size: card };
