@@ -4014,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "navia-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "audioadapter-buffers",
@@ -4056,7 +4056,7 @@ dependencies = [
 
 [[package]]
 name = "navia-gpui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "cosmic-text",
@@ -4088,7 +4088,7 @@ dependencies = [
 
 [[package]]
 name = "navia-integrations"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "log",
  "reqwest",
