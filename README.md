@@ -2,6 +2,7 @@
   <img alt="Navia" src="assets/brand/navia-app-icon-dark.svg" width="128">
 </p>
 
+<h3 align="center">Navia</h3>
 
 <p align="center">A native music player for <a href="https://www.navidrome.org/">Navidrome</a>.</p>
 <p align="center">Linux, macOS and Windows.</p>
