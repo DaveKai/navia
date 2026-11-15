@@ -8,6 +8,12 @@
 <p align="center">Linux, macOS and Windows.</p>
 
 <p align="center">
+  <a href="https://github.com/DaveKai/navia/releases/latest"><img alt="Download for Linux" src="docs/readme/download-linux.svg"></a>
+  <a href="https://github.com/DaveKai/navia/releases/latest"><img alt="Download for macOS" src="docs/readme/download-macos.svg"></a>
+  <a href="https://github.com/DaveKai/navia/releases/latest"><img alt="Download for Windows" src="docs/readme/download-windows.svg"></a>
+</p>
+
+<p align="center">
   <img alt="Navia on macOS: Home with Artist Radio and On Repeat, and the side player" src="docs/screenshots/home.webp">
 </p>
 
