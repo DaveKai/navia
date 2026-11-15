@@ -11,6 +11,7 @@ Navia runs on Wayland only. Outside a Wayland session it says so and exits.
 - `test-install.sh [x86_64|aarch64]` installs each package in clean Fedora, Arch, Debian and Ubuntu
   containers. aarch64 needs QEMU in binfmt_misc and skips Arch.
 - `clean.sh` removes these containers, images and output by name. It never runs `docker prune`.
+- `copr/` has the spec for the Fedora COPR repository, built from the release tag. See its README.
 
 The app's name and ID are in `app.env`. The package and command are `navia`, and the app ID is
 `com.davekai.Navia`. The desktop file, icons and metainfo are named after the app ID. The build stops if
