@@ -1,0 +1,133 @@
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -1386,6 +1386,7 @@
+     fn set_exclusive_zone(&self, _zone: Pixels) {}
+     #[cfg(all(target_os = "linux", feature = "wayland"))]
+     fn set_exclusive_edge(&self, _edge: layer_shell::Anchor) {}
++    fn set_layer_margin(&self, _top: Pixels, _right: Pixels, _bottom: Pixels, _left: Pixels) {}
+     fn set_input_region(&self, _region: Option<&[Bounds<Pixels>]>) {}
+     fn window_decorations(&self) -> Decorations {
+         Decorations::Server
+@@ -1399,6 +1400,7 @@
+     }
+     fn set_client_inset(&self, _inset: Pixels) {}
+     fn set_client_corner_radii(&self, _radii: Corners<Pixels>) {}
++    fn set_blur_area(&self, _area: Option<Bounds<Pixels>>) {}
+     fn gpu_specs(&self) -> Option<GpuSpecs>;
+ 
+     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -2717,6 +2717,12 @@
+         self.platform_window.set_exclusive_edge(edge);
+     }
+ 
++    /// Move a layer-shell surface by changing its margins from its anchored edges, in CSS
++    /// order (top, right, bottom, left). Applied at once. (Wayland layer-shell windows only)
++    pub fn set_layer_margin(&self, top: Pixels, right: Pixels, bottom: Pixels, left: Pixels) {
++        self.platform_window.set_layer_margin(top, right, bottom, left);
++    }
++
+     /// Start an interactive window resize operation if this window is resizable.
+     pub fn start_window_resize(&self, edge: ResizeEdge) {
+         if self.is_resizable {
+@@ -3249,6 +3255,13 @@
+         self.platform_window.set_client_corner_radii(radii);
+     }
+ 
++    /// Where a `Blurred` background blurs, in surface coordinates, rounded by the client corner
++    /// radii; `None` is the whole window inside its inset. For a surface with room of its own
++    /// around what it draws, such as a layer-shell panel's shadow. (Wayland only)
++    pub fn set_blur_area(&mut self, area: Option<Bounds<Pixels>>) {
++        self.platform_window.set_blur_area(area);
++    }
++
+     /// Returns the client_inset value by [`Self::set_client_inset`].
+     pub fn client_inset(&self) -> Option<Pixels> {
+         self.client_inset
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -142,6 +142,7 @@
+     window_controls: WindowControls,
+     client_inset: Option<Pixels>,
+     client_corner_radii: Corners<Pixels>,
++    blur_area: Option<Bounds<Pixels>>,
+     accesskit_adapter: Option<accesskit_unix::Adapter>,
+ }
+ 
+@@ -479,6 +480,17 @@
+         }
+     }
+ 
++    fn set_margin(&self, top: i32, right: i32, bottom: i32, left: i32) -> bool {
++        if let WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState { layer_surface, .. }) =
++            self
++        {
++            layer_surface.set_margin(top, right, bottom, left);
++            true
++        } else {
++            false
++        }
++    }
++
+     /// An exclusive edge must be a single edge that the surface is anchored to,
+     /// otherwise the compositor raises a fatal `invalid_exclusive_edge` protocol
+     /// error. An invalid edge is logged and ignored. Returns whether it applied.
+@@ -644,6 +656,7 @@
+             window_controls: WindowControls::default(),
+             client_inset: None,
+             client_corner_radii: Corners::default(),
++            blur_area: None,
+             accesskit_adapter: None,
+         })
+     }
+@@ -2144,6 +2157,16 @@
+         }
+     }
+ 
++    fn set_layer_margin(&self, top: Pixels, right: Pixels, bottom: Pixels, left: Pixels) {
++        let state = self.borrow();
++        let px = |p: Pixels| f32::from(p).round() as i32;
++        if state.surface_state.set_margin(px(top), px(right), px(bottom), px(left)) {
++            // Margins are double-buffered state: commit so the surface moves now, not on the
++            // next frame.
++            state.surface.commit();
++        }
++    }
++
+     fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
+         let state = self.borrow();
+         match region {
+@@ -2229,6 +2252,15 @@
+         }
+     }
+ 
++    fn set_blur_area(&self, area: Option<Bounds<Pixels>>) {
++        let mut state = self.borrow_mut();
++        if area != state.blur_area {
++            state.blur_area = area;
++            update_window(state);
++            self.0.request_redraw();
++        }
++    }
++
+     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
+         let state = self.borrow();
+         if !state.active {
+@@ -2500,6 +2532,16 @@
+             } else {
+                 area
+             };
++            // An area the app chose is in surface coordinates. Only an xdg window has a
++            // geometry for KWin to resolve it against; a layer surface has none.
++            let blur_area = match state.blur_area {
++                Some(chosen) => {
++                    let chosen = chosen.map(|value| f32::from(value) as i32);
++                    let shift = if state.globals.is_kwin && matches!(state.surface_state, WaylandSurfaceState::Xdg(_)) { area.origin } else { Point::default() };
++                    Bounds { origin: Point { x: chosen.origin.x - shift.x, y: chosen.origin.y - shift.y }, size: chosen.size }
++                }
++                None => blur_area,
++            };
+             add_rounded_rect(blur_area, state.client_corner_radii, |x, y, width, height| {
+                 region.add(x, y, width, height);
+             });

@@ -1,0 +1,38 @@
+--- a/crates/gpui_linux/src/linux/wayland/client.rs
++++ b/crates/gpui_linux/src/linux/wayland/client.rs
+@@ -257,6 +257,8 @@
+     pub decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+     pub layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+     pub kde_blur_manager: Option<org_kde_kwin_blur_manager::OrgKdeKwinBlurManager>,
++    /// KWin, which reads the blur region against the window geometry instead of the surface.
++    pub is_kwin: bool,
+     pub background_effects_manager:
+         Option<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1>,
+     pub text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
+@@ -309,6 +311,7 @@
+             decoration_manager: globals.bind(&qh, 1..=1, ()).ok(),
+             layer_shell: globals.bind(&qh, 1..=5, ()).ok(),
+             kde_blur_manager: globals.bind(&qh, 1..=1, ()).ok(),
++            is_kwin: globals.contents().with_list(|list| list.iter().any(|g| g.interface == "org_kde_kwin_appmenu_manager" || g.interface == "kde_output_device_registry_v2")),
+             background_effects_manager: globals.bind(&qh, 1..=1, ()).ok(),
+             text_input_manager: globals.bind(&qh, 1..=1, ()).ok(),
+             gesture_manager: globals.bind(&qh, 1..=3, ()).ok(),
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -2492,7 +2492,15 @@
+                 state.background_effects = Some(background_effects);
+             }
+ 
+-            add_rounded_rect(area, state.client_corner_radii, |x, y, width, height| {
++            // Per the protocol the region is in surface coordinates, but KWin resolves it
++            // against the window geometry, so its top-left shifts by the shadow inset. KWin is
++            // detected by its other KDE-only globals.
++            let blur_area = if state.globals.is_kwin {
++                Bounds { origin: Point::default(), size: area.size }
++            } else {
++                area
++            };
++            add_rounded_rect(blur_area, state.client_corner_radii, |x, y, width, height| {
+                 region.add(x, y, width, height);
+             });
+ 

@@ -1,0 +1,1417 @@
+--- a/crates/gpui/src/debug_overlay.rs
++++ b/crates/gpui/src/debug_overlay.rs
+@@ -225,6 +225,8 @@
+         border_color: transparent_black(),
+         corner_radii: Corners::default(),
+         border_widths: Edges::default(),
++        rounded_clip: 0,
++        clip_padding: [0; 3],
+     }
+ }
+ 
+--- a/crates/gpui/src/elements/div.rs
++++ b/crates/gpui/src/elements/div.rs
+@@ -2435,8 +2435,9 @@
+                 }
+ 
+                 window.with_text_style(style.text_style().cloned(), |window| {
+-                    window.with_content_mask(
+-                        style.overflow_mask(bounds, window.rem_size()),
++                    style.with_overflow(
++                        bounds,
++                        window,
+                         |window| {
+                             let hitbox = if self.should_insert_hitbox(&style, window, cx) {
+                                 Some(window.insert_hitbox(bounds, self.hitbox_behavior))
+@@ -2598,8 +2599,9 @@
+                 window.with_element_opacity(style.opacity, |window| {
+                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
+                         window.with_text_style(style.text_style().cloned(), |window| {
+-                            window.with_content_mask(
+-                                style.overflow_mask(bounds, window.rem_size()),
++                            style.with_overflow(
++                                bounds,
++                                window,
+                                 |window| {
+                                     window.with_tab_group(tab_group, |window| {
+                                         // Register the container's own focus handle *inside* its
+--- a/crates/gpui/src/scene.rs
++++ b/crates/gpui/src/scene.rs
+@@ -53,6 +53,26 @@
+     /// Backdrop blurs, in draw order once `finish` has run. They are kept out of the primitive
+     /// batches: a renderer ends its pass at each one's order to blur what is already drawn.
+     pub backdrop_blurs: Vec<BackdropBlur>,
++    /// Rounded masks that primitives refer to by `rounded_clip`, one-based so 0 is no mask. Each
++    /// names its parent, so nested masks intersect.
++    pub rounded_clips: Vec<RoundedClipNode>,
++    /// The mask primitives inserted now are given (`Window::with_rounded_clip`).
++    pub(crate) current_rounded_clip: u32,
++}
++
++/// A rounded rect primitives are masked by, in device pixels, and the mask it sits in (`parent`,
++/// one-based, 0 for none). The layout is what the renderers read: three 16-byte texels.
++#[derive(Clone, Copy, Debug, Default, PartialEq)]
++#[repr(C)]
++pub struct RoundedClipNode {
++    /// The mask's rect.
++    pub bounds: Bounds<ScaledPixels>,
++    /// Its corners: top left, top right, bottom right, bottom left.
++    pub corner_radii: Corners<ScaledPixels>,
++    /// The enclosing mask, one-based, or 0.
++    pub parent: u32,
++    /// Keeps the node a whole number of texels.
++    pub pad: [u32; 3],
+ }
+ 
+ #[expect(missing_docs)]
+@@ -70,6 +90,54 @@
+         self.polychrome_sprites.clear();
+         self.surfaces.clear();
+         self.backdrop_blurs.clear();
++        self.rounded_clips.clear();
++        self.current_rounded_clip = 0;
++    }
++
++    /// `clip`, when one of its rounded corners (or its parents') reaches into `bounds`, else 0:
++    /// a primitive clear of every corner is already cut by its rectangular content mask, and
++    /// skipping the mask spares its pixels the per-pixel corner test.
++    fn clip_reaching(&self, bounds: Bounds<ScaledPixels>, clip: u32) -> u32 {
++        let mut index = clip;
++        while index != 0 {
++            let node = &self.rounded_clips[index as usize - 1];
++            let (b, r) = (node.bounds, node.corner_radii);
++            let corner = |x: ScaledPixels, y: ScaledPixels, w: ScaledPixels, h: ScaledPixels| {
++                w.0 > 0. && !Bounds { origin: point(x, y), size: Size { width: w, height: h } }.intersect(&bounds).is_empty()
++            };
++            let (right, bottom) = (b.right(), b.bottom());
++            if corner(b.left(), b.top(), r.top_left, r.top_left)
++                || corner(right - r.top_right, b.top(), r.top_right, r.top_right)
++                || corner(right - r.bottom_right, bottom - r.bottom_right, r.bottom_right, r.bottom_right)
++                || corner(b.left(), bottom - r.bottom_left, r.bottom_left, r.bottom_left)
++            {
++                return clip;
++            }
++            index = node.parent;
++        }
++        0
++    }
++
++    /// Adds a rounded mask inside the current one and returns its one-based index.
++    pub fn push_rounded_clip(&mut self, bounds: Bounds<ScaledPixels>, corner_radii: Corners<ScaledPixels>, parent: u32) -> u32 {
++        self.rounded_clips.push(RoundedClipNode { bounds, corner_radii, parent, pad: [0; 3] });
++        self.rounded_clips.len() as u32
++    }
++
++    /// Copies mask `index` of `prev` and its ancestors into this scene (once each, through
++    /// `copied`), for primitives replayed from a cached view. Returns the new index.
++    fn copy_rounded_clip(&mut self, prev: &Scene, index: u32, copied: &mut collections::FxHashMap<u32, u32>) -> u32 {
++        if index == 0 || index as usize > prev.rounded_clips.len() {
++            return 0;
++        }
++        if let Some(&new) = copied.get(&index) {
++            return new;
++        }
++        let node = prev.rounded_clips[index as usize - 1];
++        let parent = self.copy_rounded_clip(prev, node.parent, copied);
++        let new = self.push_rounded_clip(node.bounds, node.corner_radii, parent);
++        copied.insert(index, new);
++        new
+     }
+ 
+     pub fn len(&self) -> usize {
+@@ -95,6 +163,9 @@
+         if clipped_bounds.is_empty() || blur.opacity <= 0. {
+             return;
+         }
++        if blur.rounded_clip == 0 {
++            blur.rounded_clip = self.clip_reaching(clipped_bounds, self.current_rounded_clip);
++        }
+         blur.order = self
+             .layer_stack
+             .last()
+@@ -140,6 +211,21 @@
+             .last()
+             .copied()
+             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
++        // Fresh primitives take the mask they're painted in; replayed ones keep their own.
++        let current = self.current_rounded_clip;
++        let clip = match &mut primitive {
++            Primitive::Shadow(p) => &mut p.rounded_clip,
++            Primitive::Quad(p) => &mut p.rounded_clip,
++            Primitive::Path(p) => &mut p.rounded_clip,
++            Primitive::Underline(p) => &mut p.rounded_clip,
++            Primitive::MonochromeSprite(p) => &mut p.rounded_clip,
++            Primitive::SubpixelSprite(p) => &mut p.rounded_clip,
++            Primitive::PolychromeSprite(p) => &mut p.rounded_clip,
++            Primitive::Surface(p) => &mut p.rounded_clip,
++        };
++        if *clip == 0 {
++            *clip = self.clip_reaching(clipped_bounds, current);
++        }
+         match &mut primitive {
+             Primitive::Shadow(shadow) => {
+                 shadow.order = order;
+@@ -180,10 +266,30 @@
+     }
+ 
+     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
++        // Masks are indices into the scene they were painted in, so they come along.
++        let mut copied = collections::FxHashMap::default();
+         for operation in &prev_scene.paint_operations[range] {
+             match operation {
+-                PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
+-                PaintOperation::BackdropBlur(blur) => self.insert_backdrop_blur(*blur),
++                PaintOperation::Primitive(primitive) => {
++                    let mut primitive = primitive.clone();
++                    let clip = match &mut primitive {
++                        Primitive::Shadow(p) => &mut p.rounded_clip,
++                        Primitive::Quad(p) => &mut p.rounded_clip,
++                        Primitive::Path(p) => &mut p.rounded_clip,
++                        Primitive::Underline(p) => &mut p.rounded_clip,
++                        Primitive::MonochromeSprite(p) => &mut p.rounded_clip,
++                        Primitive::SubpixelSprite(p) => &mut p.rounded_clip,
++                        Primitive::PolychromeSprite(p) => &mut p.rounded_clip,
++                        Primitive::Surface(p) => &mut p.rounded_clip,
++                    };
++                    *clip = self.copy_rounded_clip(prev_scene, *clip, &mut copied);
++                    self.insert_primitive(primitive);
++                }
++                PaintOperation::BackdropBlur(blur) => {
++                    let mut blur = *blur;
++                    blur.rounded_clip = self.copy_rounded_clip(prev_scene, blur.rounded_clip, &mut copied);
++                    self.insert_backdrop_blur(blur);
++                }
+                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
+                 PaintOperation::EndLayer => self.pop_layer(),
+             }
+@@ -249,14 +355,17 @@
+     pub saturation: f32,
+     /// How much of the effect replaces the unblurred backdrop.
+     pub opacity: f32,
+-    /// How far above its bottom edge the effect fades out to nothing, for a soft edge.
+-    pub bottom_fade: ScaledPixels,
++    /// How far in from each edge the effect fades out to nothing, for soft edges. Zero is a
++    /// hard edge.
++    pub fades: Edges<ScaledPixels>,
+     /// The rect the frosted backdrop fills.
+     pub bounds: Bounds<ScaledPixels>,
+     /// The mask the rect is clipped to.
+     pub content_mask: ContentMask<ScaledPixels>,
+     /// The rect's rounding, matching the surface painted over it.
+     pub corner_radii: Corners<ScaledPixels>,
++    /// The rounded clip the effect is masked by: an index into [`Scene::rounded_clips`] plus one, or 0.
++    pub rounded_clip: u32,
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Default)]
+@@ -621,6 +730,10 @@
+     pub border_color: Hsla,
+     pub corner_radii: Corners<ScaledPixels>,
+     pub border_widths: Edges<ScaledPixels>,
++    /// The rounded clip this is masked by: an index into [`Scene::rounded_clips`] plus one, or 0.
++    pub rounded_clip: u32,
++    /// Keeps a quad a whole number of 16-byte texels (the WebGL instance texture).
++    pub clip_padding: [u32; 3],
+ }
+ 
+ impl From<Quad> for Primitive {
+@@ -634,7 +747,8 @@
+ #[expect(missing_docs)]
+ pub struct Underline {
+     pub order: DrawOrder,
+-    pub pad: u32, // align to 8 bytes
++    /// The rounded clip this is masked by: an index into [`Scene::rounded_clips`] plus one, or 0.
++    pub rounded_clip: u32,
+     pub bounds: Bounds<ScaledPixels>,
+     pub content_mask: ContentMask<ScaledPixels>,
+     pub color: Hsla,
+@@ -662,7 +776,8 @@
+     pub element_corner_radii: Corners<ScaledPixels>,
+     /// 0 = drop shadow (rendered outside the element), 1 = inset shadow (rendered inside).
+     pub inset: u32,
+-    pub pad: u32, // align to 8 bytes
++    /// The rounded clip this is masked by: an index into [`Scene::rounded_clips`] plus one, or 0.
++    pub rounded_clip: u32,
+ }
+ 
+ impl From<Shadow> for Primitive {
+@@ -790,7 +905,8 @@
+ #[expect(missing_docs)]
+ pub struct MonochromeSprite {
+     pub order: DrawOrder,
+-    pub pad: u32,
++    /// The rounded clip this is masked by: an index into [`Scene::rounded_clips`] plus one, or 0.
++    pub rounded_clip: u32,
+     pub tile: AtlasTile,
+     pub bounds: Bounds<ScaledPixels>,
+     pub content_mask: ContentMask<ScaledPixels>,
+@@ -809,7 +925,8 @@
+ #[expect(missing_docs)]
+ pub struct SubpixelSprite {
+     pub order: DrawOrder,
+-    pub pad: u32, // align to 8 bytes
++    /// The rounded clip this is masked by: an index into [`Scene::rounded_clips`] plus one, or 0.
++    pub rounded_clip: u32,
+     pub tile: AtlasTile,
+     pub bounds: Bounds<ScaledPixels>,
+     pub content_mask: ContentMask<ScaledPixels>,
+@@ -828,7 +945,8 @@
+ #[expect(missing_docs)]
+ pub struct PolychromeSprite {
+     pub order: DrawOrder,
+-    pub pad: u32,
++    /// The rounded clip this is masked by: an index into [`Scene::rounded_clips`] plus one, or 0.
++    pub rounded_clip: u32,
+     pub tile: AtlasTile,
+     pub grayscale: PaddedBool32,
+     pub opacity: f32,
+@@ -847,6 +965,8 @@
+ #[allow(missing_docs)]
+ pub struct PaintSurface {
+     pub order: DrawOrder,
++    /// The rounded clip this is masked by: an index into [`Scene::rounded_clips`] plus one, or 0.
++    pub rounded_clip: u32,
+     pub bounds: Bounds<ScaledPixels>,
+     pub content_mask: ContentMask<ScaledPixels>,
+     #[cfg(any(target_os = "macos", target_os = "ios"))]
+@@ -869,6 +989,8 @@
+ pub struct Path<P: Clone + Debug + Default + PartialEq> {
+     pub id: PathId,
+     pub order: DrawOrder,
++    /// The rounded clip this is masked by: an index into [`Scene::rounded_clips`] plus one, or 0.
++    pub rounded_clip: u32,
+     pub bounds: Bounds<P>,
+     pub content_mask: ContentMask<P>,
+     pub vertices: Vec<PathVertex<P>>,
+@@ -891,6 +1013,7 @@
+                 origin: start,
+                 size: Default::default(),
+             },
++            rounded_clip: 0,
+             content_mask: Default::default(),
+             color: Default::default(),
+             contour_count: 0,
+@@ -902,6 +1025,7 @@
+         Path {
+             id: self.id,
+             order: self.order,
++            rounded_clip: self.rounded_clip,
+             bounds: self.bounds.scale(factor),
+             content_mask: self.content_mask.scale(factor),
+             vertices: self
+--- a/crates/gpui/src/style.rs
++++ b/crates/gpui/src/style.rs
+@@ -633,6 +633,35 @@
+         }
+     }
+ 
++    /// Runs `draw` inside this style's overflow clip: the content mask, and when the element hides
++    /// its overflow on both axes and has rounded corners, a rounded clip inside its border.
++    pub(crate) fn with_overflow<R>(
++        &self,
++        bounds: Bounds<Pixels>,
++        window: &mut Window,
++        draw: impl FnOnce(&mut Window) -> R,
++    ) -> R {
++        let rem_size = window.rem_size();
++        let mask = self.overflow_mask(bounds, rem_size);
++        let both = self.overflow.x != Overflow::Visible && self.overflow.y != Overflow::Visible;
++        let Some(mask) = mask.filter(|_| both) else {
++            return window.with_content_mask(mask, draw);
++        };
++        let corners = self.corner_radii.to_pixels(rem_size).clamp_radii_for_quad_size(bounds.size);
++        let widths = if self.border_color.is_some_and(|color| !color.is_transparent()) {
++            self.border_widths.to_pixels(rem_size)
++        } else {
++            Edges::default()
++        };
++        let corners = Corners {
++            top_left: (corners.top_left - widths.top.max(widths.left)).max(Pixels::ZERO),
++            top_right: (corners.top_right - widths.top.max(widths.right)).max(Pixels::ZERO),
++            bottom_right: (corners.bottom_right - widths.bottom.max(widths.right)).max(Pixels::ZERO),
++            bottom_left: (corners.bottom_left - widths.bottom.max(widths.left)).max(Pixels::ZERO),
++        };
++        window.with_rounded_clip(mask.bounds, corners, draw)
++    }
++
+     /// Get the content mask for this element style, based on the given bounds.
+     /// If the element does not hide its overflow, this will return `None`.
+     pub fn overflow_mask(
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -273,6 +273,10 @@
+         self.inner.borrow().draw_phase == DrawPhase::None
+     }
+ 
++    pub fn is_painting(&self) -> bool {
++        self.inner.borrow().draw_phase == DrawPhase::Paint
++    }
++
+     #[track_caller]
+     pub fn debug_assert_paint(&self) {
+         debug_assert!(
+@@ -841,6 +845,8 @@
+     pub content_mask: ContentMask<Pixels>,
+     /// Flags that specify hitbox behavior.
+     pub behavior: HitboxBehavior,
++    /// The rounded clip when the hitbox was inserted: the clipped-off corners aren't hit.
++    pub(crate) rounded_clip: Option<Arc<RoundedClipRegion>>,
+ }
+ 
+ impl Hitbox {
+@@ -1021,6 +1027,36 @@
+     }
+ }
+ 
++/// A rounded clip in window pixels, inside its parent's.
++#[derive(Debug, PartialEq)]
++pub(crate) struct RoundedClipRegion {
++    bounds: Bounds<Pixels>,
++    corners: Corners<Pixels>,
++    parent: Option<Arc<RoundedClipRegion>>,
++}
++
++impl RoundedClipRegion {
++    /// Whether `position` is inside this clip and every clip around it.
++    fn contains(&self, position: Point<Pixels>) -> bool {
++        if !self.bounds.contains(&position) {
++            return false;
++        }
++        let offset = position - self.bounds.origin;
++        let (width, height) = (self.bounds.size.width, self.bounds.size.height);
++        let (radius, horizontal, vertical) = if offset.x < width / 2.0 {
++            if offset.y < height / 2.0 { (self.corners.top_left, offset.x, offset.y) } else { (self.corners.bottom_left, offset.x, height - offset.y) }
++        } else if offset.y < height / 2.0 {
++            (self.corners.top_right, width - offset.x, offset.y)
++        } else {
++            (self.corners.bottom_right, width - offset.x, height - offset.y)
++        };
++        let inside = horizontal >= radius
++            || vertical >= radius
++            || f32::from(horizontal - radius).powi(2) + f32::from(vertical - radius).powi(2) <= f32::from(radius).powi(2);
++        inside && self.parent.as_ref().is_none_or(|parent| parent.contains(position))
++    }
++}
++
+ pub(crate) struct DeferredDraw {
+     current_view: EntityId,
+     priority: usize,
+@@ -1028,6 +1064,8 @@
+     element_id_stack: ElementIdStack,
+     text_style_stack: Vec<TextStyleRefinement>,
+     content_mask: Option<ContentMask<Pixels>>,
++    /// The rounded clip it's drawn in: the one around it when it has a content mask, else none.
++    rounded_clip: Option<Arc<RoundedClipRegion>>,
+     rem_size: Pixels,
+     element: Option<AnyElement>,
+     absolute_offset: Point<Pixels>,
+@@ -1171,7 +1209,9 @@
+         let mut hit_test = HitTest::default();
+         for hitbox in self.hitboxes.iter().rev() {
+             let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+-            if bounds.contains(&position) {
++            if bounds.contains(&position)
++                && hitbox.rounded_clip.as_ref().is_none_or(|clip| clip.contains(position))
++            {
+                 hit_test.ids.push(hitbox.id);
+                 if !set_hover_hitbox_count
+                     && hitbox.behavior == HitboxBehavior::BlockMouseExceptScroll
+@@ -1244,6 +1284,8 @@
+     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
+     pub(crate) element_opacity: f32,
+     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
++    /// The rounded clip being drawn in, in window pixels, for hit tests and deferred draws.
++    pub(crate) rounded_clip: Option<Arc<RoundedClipRegion>>,
+     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
+     /// The [`TextInputConfiguration`] most recently forwarded to the platform
+     /// window, so that only actual changes are forwarded (reconfiguring a live
+@@ -2370,6 +2412,7 @@
+             rendered_entity_stack: Vec::new(),
+             element_offset_stack: Vec::new(),
+             content_mask_stack: Vec::new(),
++            rounded_clip: None,
+             element_opacity: 1.0,
+             requested_autoscroll: None,
+             last_text_input_configuration: None,
+@@ -3522,7 +3565,7 @@
+     fn underline(&self, origin: Point<Pixels>, width: Pixels, style: &UnderlineStyle) -> Underline {
+         Underline {
+             order: 0,
+-            pad: 0,
++            rounded_clip: 0,
+             bounds: self.underline_bounds(origin, width, style),
+             content_mask: self.snapped_content_mask(),
+             color: style
+@@ -4215,6 +4258,9 @@
+ 
+             let paint_start = self.paint_index();
+             let content_mask = deferred_draw.content_mask;
++            let previous_clip = self.rounded_clip.clone();
++            let previous_gpu_clip = self.next_frame.scene.current_rounded_clip;
++            self.install_rounded_clip(deferred_draw.rounded_clip.clone());
+             if let Some(element) = deferred_draw.element.as_mut() {
+                 let ((), accessed_entities) = cx.detect_accessed_entities(|cx| {
+                     self.with_rendered_view(deferred_draw.current_view, |window| {
+@@ -4231,6 +4277,8 @@
+             }
+             let paint_end = self.paint_index();
+             deferred_draw.paint_range = paint_start..paint_end;
++            self.rounded_clip = previous_clip;
++            self.next_frame.scene.current_rounded_clip = previous_gpu_clip;
+         }
+         self.next_frame.deferred_draws = deferred_draws;
+         self.element_id_stack.clear();
+@@ -4295,6 +4343,7 @@
+                     element_id_stack: deferred_draw.element_id_stack.clone(),
+                     text_style_stack: deferred_draw.text_style_stack.clone(),
+                     content_mask: deferred_draw.content_mask,
++                    rounded_clip: deferred_draw.rounded_clip.clone(),
+                     rem_size: deferred_draw.rem_size,
+                     priority: deferred_draw.priority,
+                     element: None,
+@@ -4439,6 +4488,51 @@
+         }
+     }
+ 
++    /// Clips what `f` draws to a rounded rect: every primitive is masked by it in the renderer's
++    /// shaders, and hit tests skip the cut-off corners. Nested clips intersect. With no rounding
++    /// this is just a content mask.
++    pub fn with_rounded_clip<R>(
++        &mut self,
++        bounds: Bounds<Pixels>,
++        corners: Corners<Pixels>,
++        f: impl FnOnce(&mut Self) -> R,
++    ) -> R {
++        self.invalidator.debug_assert_paint_or_prepaint();
++        let corners = Corners {
++            top_left: corners.top_left.max(Pixels::ZERO),
++            top_right: corners.top_right.max(Pixels::ZERO),
++            bottom_right: corners.bottom_right.max(Pixels::ZERO),
++            bottom_left: corners.bottom_left.max(Pixels::ZERO),
++        }
++        .clamp_radii_for_quad_size(bounds.size);
++        if corners == Corners::default() {
++            return self.with_content_mask(Some(ContentMask { bounds }), f);
++        }
++        let previous = self.rounded_clip.take();
++        self.rounded_clip = Some(Arc::new(RoundedClipRegion { bounds, corners, parent: previous.clone() }));
++        let parent = self.next_frame.scene.current_rounded_clip;
++        if self.invalidator.is_painting() {
++            let scale_factor = self.scale_factor();
++            self.next_frame.scene.current_rounded_clip =
++                self.next_frame.scene.push_rounded_clip(bounds.scale(scale_factor), corners.scale(scale_factor), parent);
++        }
++        let result = self.with_content_mask(Some(ContentMask { bounds }), f);
++        self.next_frame.scene.current_rounded_clip = parent;
++        self.rounded_clip = previous;
++        result
++    }
++
++    /// Makes `clip` (and its parents) the rounded clip drawn in, for a deferred draw.
++    fn install_rounded_clip(&mut self, clip: Option<Arc<RoundedClipRegion>>) {
++        fn insert(window: &mut Window, clip: &RoundedClipRegion) -> u32 {
++            let parent = clip.parent.as_ref().map_or(0, |parent| insert(window, parent));
++            let scale_factor = window.scale_factor();
++            window.next_frame.scene.push_rounded_clip(clip.bounds.scale(scale_factor), clip.corners.scale(scale_factor), parent)
++        }
++        self.next_frame.scene.current_rounded_clip = clip.as_ref().map_or(0, |clip| insert(self, clip));
++        self.rounded_clip = clip;
++    }
++
+     /// Updates the global element offset relative to the current offset. This is used to implement
+     /// scrolling. This method should only be called during the prepaint phase of element drawing.
+     pub fn with_element_offset<R>(
+@@ -4778,6 +4872,7 @@
+             element_id_stack: self.element_id_stack.clone(),
+             text_style_stack: self.text_style_stack.clone(),
+             content_mask,
++            rounded_clip: content_mask.and(self.rounded_clip.clone()),
+             rem_size: self.rem_size(),
+             priority,
+             element: Some(element),
+@@ -4846,7 +4941,7 @@
+                 element_bounds,
+                 element_corner_radii,
+                 inset: 0,
+-                pad: 0,
++                rounded_clip: 0,
+             });
+         }
+     }
+@@ -4891,7 +4986,7 @@
+                 element_bounds,
+                 element_corner_radii,
+                 inset: 1,
+-                pad: 0,
++                rounded_clip: 0,
+             });
+         }
+     }
+@@ -4937,7 +5032,8 @@
+ 
+     /// Paints a frosted backdrop: what was drawn beneath `bounds` before this call is blurred by
+     /// `blur_radius`, its saturation scaled by `saturation`, and painted back inside the rounded
+-    /// rect, fading out over the bottom `bottom_fade` pixels. Whatever is painted after it
++    /// rect, fading out over the bottom `bottom_fade` pixels (see [`Self::paint_backdrop_blur_faded`]
++    /// for the other edges). Whatever is painted after it
+     /// composites on top. The current element opacity fades the effect. Renderers without
+     /// support draw nothing, so keep a translucent fill over it.
+     ///
+@@ -4950,6 +5046,22 @@
+         saturation: f32,
+         bottom_fade: Pixels,
+     ) {
++        let fades = Edges { bottom: bottom_fade, ..Edges::default() };
++        self.paint_backdrop_blur_faded(bounds, corner_radii, blur_radius, saturation, fades);
++    }
++
++    /// [`Self::paint_backdrop_blur`] with the effect fading out over `fades` from each edge:
++    /// top, right, bottom and left, each a length in from that edge (zero for a hard edge).
++    ///
++    /// This method should only be called as part of the paint phase of element drawing.
++    pub fn paint_backdrop_blur_faded(
++        &mut self,
++        bounds: Bounds<Pixels>,
++        corner_radii: Corners<Pixels>,
++        blur_radius: Pixels,
++        saturation: f32,
++        fades: Edges<Pixels>,
++    ) {
+         self.invalidator.debug_assert_paint();
+ 
+         let scale_factor = self.scale_factor();
+@@ -4958,10 +5070,11 @@
+             blur_radius: blur_radius.scale(scale_factor),
+             saturation,
+             opacity: self.element_opacity(),
+-            bottom_fade: bottom_fade.scale(scale_factor),
++            fades: fades.scale(scale_factor),
+             bounds: self.cover_bounds(bounds),
+             content_mask: self.snapped_content_mask(),
+             corner_radii: corner_radii.scale(scale_factor),
++            rounded_clip: 0,
+         });
+     }
+ 
+@@ -4989,6 +5102,8 @@
+             corner_radii: quad.corner_radii.scale(self.scale_factor()),
+             border_widths: snapped_border_widths,
+             border_style: quad.border_style,
++            rounded_clip: 0,
++            clip_padding: [0; 3],
+         };
+ 
+         if !quad.background.is_transparent() {
+@@ -5094,7 +5209,7 @@
+ 
+         self.next_frame.scene.insert_primitive(Underline {
+             order: 0,
+-            pad: 0,
++            rounded_clip: 0,
+             bounds,
+             content_mask: self.snapped_content_mask(),
+             thickness: self.snap_stroke(style.thickness),
+@@ -5167,7 +5282,7 @@
+             if subpixel_rendering {
+                 self.next_frame.scene.insert_primitive(SubpixelSprite {
+                     order: 0,
+-                    pad: 0,
++                    rounded_clip: 0,
+                     bounds,
+                     content_mask,
+                     color: color.opacity(element_opacity),
+@@ -5177,7 +5292,7 @@
+             } else {
+                 self.next_frame.scene.insert_primitive(MonochromeSprite {
+                     order: 0,
+-                    pad: 0,
++                    rounded_clip: 0,
+                     bounds,
+                     content_mask,
+                     color: color.opacity(element_opacity),
+@@ -5258,7 +5373,7 @@
+ 
+             self.next_frame.scene.insert_primitive(PolychromeSprite {
+                 order: 0,
+-                pad: 0,
++                rounded_clip: 0,
+                 grayscale: false.into(),
+                 bounds,
+                 corner_radii: Default::default(),
+@@ -5324,7 +5439,7 @@
+ 
+         self.next_frame.scene.insert_primitive(MonochromeSprite {
+             order: 0,
+-            pad: 0,
++            rounded_clip: 0,
+             bounds: final_bounds,
+             content_mask,
+             color: color.opacity(element_opacity),
+@@ -5430,7 +5545,7 @@
+ 
+         self.next_frame.scene.insert_primitive(PolychromeSprite {
+             order: 0,
+-            pad: 0,
++            rounded_clip: 0,
+             grayscale: grayscale.into(),
+             bounds: visible_bounds_snapped,
+             content_mask,
+@@ -5458,6 +5573,7 @@
+         let content_mask = self.snapped_content_mask();
+         self.next_frame.scene.insert_primitive(PaintSurface {
+             order: 0,
++            rounded_clip: 0,
+             bounds,
+             content_mask,
+             image_buffer,
+@@ -5596,6 +5712,7 @@
+             bounds,
+             content_mask,
+             behavior,
++            rounded_clip: self.rounded_clip.clone(),
+         };
+         self.next_frame.hitboxes.push(hitbox.clone());
+         hitbox
+--- a/crates/gpui_wgpu/src/shaders_subpixel.wgsl
++++ b/crates/gpui_wgpu/src/shaders_subpixel.wgsl
+@@ -2,7 +2,7 @@
+ 
+ struct SubpixelSprite {
+     order: u32,
+-    pad: u32,
++    rounded_clip: u32,
+     tile: AtlasTile,
+     bounds: Bounds,
+     content_mask: Bounds,
+@@ -16,6 +16,7 @@
+     @location(0) tile_position: vec2<f32>,
+     @location(1) @interpolate(flat) color: vec4<f32>,
+     @location(3) clip_distances: vec4<f32>,
++    @location(9) @interpolate(flat) rounded_clip: u32,
+ }
+ 
+ struct SubpixelSpriteFragmentOutput {
+@@ -33,11 +34,18 @@
+     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+     out.color = hsla_to_rgba(sprite.color);
+     out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
++    out.rounded_clip = sprite.rounded_clip;
+     return out;
+ }
+ 
+ @fragment
+ fn fs_subpixel_sprite(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutput {
++    let out = fs_subpixel_sprite_unclipped(input);
++    let coverage = rounded_clip_coverage(input.rounded_clip, input.position.xy);
++    return SubpixelSpriteFragmentOutput(vec4<f32>(out.foreground.rgb, out.foreground.a * coverage), out.alpha * coverage);
++}
++
++fn fs_subpixel_sprite_unclipped(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutput {
+     var sample = textureSample(t_sprite, s_sprite, input.tile_position).rgb;
+     if (gamma_params.is_bgr != 0u) {
+         sample = sample.bgr;
+--- a/crates/gpui_wgpu/src/shaders_webgl.wgsl
++++ b/crates/gpui_wgpu/src/shaders_webgl.wgsl
+@@ -138,7 +138,7 @@
+ fn load_quad(instance_id: u32) -> Quad {
+     // Keep this fixed-layout decoder explicit. Some WebGL shader compilers fail
+     // to optimize the cursor's branches and dynamic vector indexing for quads.
+-    let first_texel_index = instance_id * 10u;
++    let first_texel_index = instance_id * 11u;
+     let width = textureDimensions(t_instances).x;
+     let texel0 = fetch_instance_texel(first_texel_index, width);
+     let texel1 = fetch_instance_texel(first_texel_index + 1u, width);
+@@ -150,6 +150,7 @@
+     let texel7 = fetch_instance_texel(first_texel_index + 7u, width);
+     let texel8 = fetch_instance_texel(first_texel_index + 8u, width);
+     let texel9 = fetch_instance_texel(first_texel_index + 9u, width);
++    let texel10 = fetch_instance_texel(first_texel_index + 10u, width);
+ 
+     let values0 = bitcast<vec4<f32>>(texel0);
+     let values1 = bitcast<vec4<f32>>(texel1);
+@@ -187,6 +188,10 @@
+         Hsla(values7.x, values7.y, values7.z, values7.w),
+         Corners(values8.x, values8.y, values8.z, values8.w),
+         Edges(values9.x, values9.y, values9.z, values9.w),
++        texel10.x,
++        texel10.y,
++        texel10.z,
++        texel10.w,
+     );
+ }
+ 
+@@ -207,12 +212,14 @@
+ }
+ 
+ fn load_path_vertex(vertex_id: u32) -> PathRasterizationVertex {
+-    var cursor = instance_cursor(vertex_id * 26u);
++    var cursor = instance_cursor(vertex_id * 28u);
+     return PathRasterizationVertex(
+         read_vec2_f32(&cursor),
+         read_vec2_f32(&cursor),
+         read_background(&cursor),
+         read_bounds(&cursor),
++        read_word(&cursor),
++        read_word(&cursor),
+     );
+ }
+ 
+--- a/crates/gpui_wgpu/src/shaders.wgsl
++++ b/crates/gpui_wgpu/src/shaders.wgsl
+@@ -525,6 +525,10 @@
+     border_color: Hsla,
+     corner_radii: Corners,
+     border_widths: Edges,
++    rounded_clip: u32,
++    clip_pad0: u32,
++    clip_pad1: u32,
++    clip_pad2: u32,
+ }
+ 
+ struct QuadVarying {
+@@ -536,8 +540,10 @@
+     @location(3) @interpolate(flat) background_solid: vec4<f32>,
+     @location(4) @interpolate(flat) background_color0: vec4<f32>,
+     @location(5) @interpolate(flat) background_color1: vec4<f32>,
++    @location(9) @interpolate(flat) rounded_clip: u32,
+ }
+ 
++
+ @vertex
+ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> QuadVarying {
+     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+@@ -558,11 +564,16 @@
+     out.border_color = hsla_to_rgba(quad.border_color);
+     out.quad_id = instance_id;
+     out.clip_distances = distance_from_clip_rect(unit_vertex, quad.bounds, quad.content_mask);
++    out.rounded_clip = quad.rounded_clip;
+     return out;
+ }
+ 
+ @fragment
+ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
++    return rounded_clip_color(fs_quad_unclipped(input), rounded_clip_coverage(input.rounded_clip, input.position.xy));
++}
++
++fn fs_quad_unclipped(input: QuadVarying) -> vec4<f32> {
+     // Alpha clip first, since we don't have `clip_distance`.
+     if (any(input.clip_distances < vec4<f32>(0.0))) {
+         return vec4<f32>(0.0);
+@@ -961,7 +972,7 @@
+     element_corner_radii: Corners,
+     // 0 = drop shadow, 1 = inset shadow.
+     inset: u32,
+-    pad: u32, // align to 8 bytes
++    rounded_clip: u32,
+ }
+ 
+ struct ShadowVarying {
+@@ -970,8 +981,10 @@
+     @location(1) @interpolate(flat) shadow_id: u32,
+     //TODO: use `clip_distance` once Naga supports it
+     @location(3) clip_distances: vec4<f32>,
++    @location(9) @interpolate(flat) rounded_clip: u32,
+ }
+ 
++
+ @vertex
+ fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> ShadowVarying {
+     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+@@ -993,11 +1006,16 @@
+     out.color = hsla_to_rgba(shadow.color);
+     out.shadow_id = instance_id;
+     out.clip_distances = distance_from_clip_rect(unit_vertex, geometry, shadow.content_mask);
++    out.rounded_clip = shadow.rounded_clip;
+     return out;
+ }
+ 
+ @fragment
+ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
++    return rounded_clip_color(fs_shadow_unclipped(input), rounded_clip_coverage(input.rounded_clip, input.position.xy));
++}
++
++fn fs_shadow_unclipped(input: ShadowVarying) -> vec4<f32> {
+     // Alpha clip first, since we don't have `clip_distance`.
+     if (any(input.clip_distances < vec4<f32>(0.0))) {
+         return vec4<f32>(0.0);
+@@ -1052,6 +1070,8 @@
+     st_position: vec2<f32>,
+     color: Background,
+     bounds: Bounds,
++    rounded_clip: u32,
++    clip_padding: u32,
+ }
+ 
+ 
+@@ -1062,8 +1082,10 @@
+     @location(1) @interpolate(flat) vertex_id: u32,
+     //TODO: use `clip_distance` once Naga supports it
+     @location(3) clip_distances: vec4<f32>,
++    @location(9) @interpolate(flat) rounded_clip: u32,
+ }
+ 
++
+ @vertex
+ fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasterizationVarying {
+     let v = load_path_vertex(vertex_id);
+@@ -1073,11 +1095,16 @@
+     out.st_position = v.st_position;
+     out.vertex_id = vertex_id;
+     out.clip_distances = distance_from_clip_rect_impl(v.xy_position, v.bounds);
++    out.rounded_clip = v.rounded_clip;
+     return out;
+ }
+ 
+ @fragment
+ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f32> {
++    return fs_path_rasterization_unclipped(input) * rounded_clip_coverage(input.rounded_clip, input.position.xy);
++}
++
++fn fs_path_rasterization_unclipped(input: PathRasterizationVarying) -> vec4<f32> {
+     let dx = dpdx(input.st_position);
+     let dy = dpdy(input.st_position);
+     if (any(input.clip_distances < vec4<f32>(0.0))) {
+@@ -1148,7 +1175,7 @@
+ 
+ struct Underline {
+     order: u32,
+-    pad: u32,
++    rounded_clip: u32,
+     bounds: Bounds,
+     content_mask: Bounds,
+     color: Hsla,
+@@ -1163,8 +1190,10 @@
+     @location(1) @interpolate(flat) underline_id: u32,
+     //TODO: use `clip_distance` once Naga supports it
+     @location(3) clip_distances: vec4<f32>,
++    @location(9) @interpolate(flat) rounded_clip: u32,
+ }
+ 
++
+ @vertex
+ fn vs_underline(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> UnderlineVarying {
+     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+@@ -1175,11 +1204,16 @@
+     out.color = hsla_to_rgba(underline.color);
+     out.underline_id = instance_id;
+     out.clip_distances = distance_from_clip_rect(unit_vertex, underline.bounds, underline.content_mask);
++    out.rounded_clip = underline.rounded_clip;
+     return out;
+ }
+ 
+ @fragment
+ fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
++    return rounded_clip_color(fs_underline_unclipped(input), rounded_clip_coverage(input.rounded_clip, input.position.xy));
++}
++
++fn fs_underline_unclipped(input: UnderlineVarying) -> vec4<f32> {
+     const WAVE_FREQUENCY: f32 = 2.0;
+     const WAVE_HEIGHT_RATIO: f32 = 0.8;
+ 
+@@ -1214,7 +1248,7 @@
+ 
+ struct MonochromeSprite {
+     order: u32,
+-    pad: u32,
++    rounded_clip: u32,
+     tile: AtlasTile,
+     bounds: Bounds,
+     content_mask: Bounds,
+@@ -1228,8 +1262,10 @@
+     @location(0) tile_position: vec2<f32>,
+     @location(1) @interpolate(flat) color: vec4<f32>,
+     @location(3) clip_distances: vec4<f32>,
++    @location(9) @interpolate(flat) rounded_clip: u32,
+ }
+ 
++
+ @vertex
+ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> MonoSpriteVarying {
+     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+@@ -1241,11 +1277,16 @@
+     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+     out.color = hsla_to_rgba(sprite.color);
+     out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
++    out.rounded_clip = sprite.rounded_clip;
+     return out;
+ }
+ 
+ @fragment
+ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
++    return rounded_clip_color(fs_mono_sprite_unclipped(input), rounded_clip_coverage(input.rounded_clip, input.position.xy));
++}
++
++fn fs_mono_sprite_unclipped(input: MonoSpriteVarying) -> vec4<f32> {
+     let sample = textureSample(t_sprite, s_sprite, input.tile_position).r;
+     let alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
+ 
+@@ -1261,7 +1302,7 @@
+ 
+ struct PolychromeSprite {
+     order: u32,
+-    pad: u32,
++    rounded_clip: u32,
+     tile: AtlasTile,
+     grayscale: u32,
+     opacity: f32,
+@@ -1276,8 +1317,10 @@
+     @location(0) tile_position: vec2<f32>,
+     @location(1) @interpolate(flat) sprite_id: u32,
+     @location(3) clip_distances: vec4<f32>,
++    @location(9) @interpolate(flat) rounded_clip: u32,
+ }
+ 
++
+ @vertex
+ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> PolySpriteVarying {
+     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+@@ -1288,11 +1331,16 @@
+     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+     out.sprite_id = instance_id;
+     out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
++    out.rounded_clip = sprite.rounded_clip;
+     return out;
+ }
+ 
+ @fragment
+ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
++    return rounded_clip_color(fs_poly_sprite_unclipped(input), rounded_clip_coverage(input.rounded_clip, input.position.xy));
++}
++
++fn fs_poly_sprite_unclipped(input: PolySpriteVarying) -> vec4<f32> {
+     let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+     // Alpha clip after using the derivatives.
+     if (any(input.clip_distances < vec4<f32>(0.0))) {
+@@ -1333,8 +1381,10 @@
+     blurred_scale: vec2<f32>,
+     saturation: f32,
+     opacity: f32,
+-    bottom_fade: f32,
+-    pad: f32,
++    rounded_clip: u32,
++    pad: u32,
++    // How far in from the top, right, bottom and left edges the effect fades out (0: hard).
++    fades: vec4<f32>,
+ }
+ 
+ @group(1) @binding(0) var<uniform> backdrop_pass: BackdropBlurPassParams;
+@@ -1408,11 +1458,14 @@
+     frosted = vec4<f32>(clamp(saturated, vec3<f32>(0.0), vec3<f32>(frosted.a)), frosted.a);
+ 
+     let distance = quad_sdf(position.xy, params.bounds, params.corner_radii);
+-    var coverage = saturate(0.5 - distance) * saturate(params.opacity);
+-    if (params.bottom_fade > 0.0) {
+-        let bottom = params.bounds.origin.y + params.bounds.size.y;
+-        coverage *= saturate((bottom - position.y) / params.bottom_fade);
+-    }
++    var coverage = saturate(0.5 - distance) * saturate(params.opacity)
++        * rounded_clip_coverage(params.rounded_clip, position.xy);
++    let low = params.bounds.origin;
++    let high = params.bounds.origin + params.bounds.size;
++    if (params.fades.x > 0.0) { coverage *= saturate((position.y - low.y) / params.fades.x); }
++    if (params.fades.y > 0.0) { coverage *= saturate((high.x - position.x) / params.fades.y); }
++    if (params.fades.z > 0.0) { coverage *= saturate((high.y - position.y) / params.fades.z); }
++    if (params.fades.w > 0.0) { coverage *= saturate((position.x - low.x) / params.fades.w); }
+     return mix(original, frosted, coverage);
+ }
+ 
+@@ -1421,6 +1474,10 @@
+ struct SurfaceParams {
+     bounds: Bounds,
+     content_mask: Bounds,
++    rounded_clip: u32,
++    clip_pad0: u32,
++    clip_pad1: u32,
++    clip_pad2: u32,
+ }
+ 
+ @group(1) @binding(0) var<uniform> surface_locals: SurfaceParams;
+@@ -1439,8 +1496,10 @@
+     @builtin(position) position: vec4<f32>,
+     @location(0) texture_position: vec2<f32>,
+     @location(3) clip_distances: vec4<f32>,
++    @location(9) @interpolate(flat) rounded_clip: u32,
+ }
+ 
++
+ @vertex
+ fn vs_surface(@builtin(vertex_index) vertex_id: u32) -> SurfaceVarying {
+     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+@@ -1449,11 +1508,16 @@
+     out.position = to_device_position(unit_vertex, surface_locals.bounds);
+     out.texture_position = unit_vertex;
+     out.clip_distances = distance_from_clip_rect(unit_vertex, surface_locals.bounds, surface_locals.content_mask);
++    out.rounded_clip = surface_locals.rounded_clip;
+     return out;
+ }
+ 
+ @fragment
+ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
++    return rounded_clip_color(fs_surface_unclipped(input), rounded_clip_coverage(input.rounded_clip, input.position.xy));
++}
++
++fn fs_surface_unclipped(input: SurfaceVarying) -> vec4<f32> {
+     // Alpha clip after using the derivatives.
+     if (any(input.clip_distances < vec4<f32>(0.0))) {
+         return vec4<f32>(0.0);
+@@ -1466,3 +1530,36 @@
+ 
+     return ycbcr_to_RGB * y_cb_cr;
+ }
++
++// --- rounded clips --- //
++
++// `Scene::rounded_clips`, three texels a clip: its bounds, its corner radii, and its parent
++// (one-based, 0 for none) in the first word of the third.
++@group(0) @binding(2) var t_rounded_clips: texture_2d<u32>;
++
++fn rounded_clip_texel(index: u32) -> vec4<u32> {
++    let width = textureDimensions(t_rounded_clips).x;
++    return textureLoad(t_rounded_clips, vec2<i32>(i32(index % width), i32(index / width)), 0);
++}
++
++// How much of the pixel at `position` is inside clip `first` and every clip around it.
++fn rounded_clip_coverage(first: u32, position: vec2<f32>) -> f32 {
++    var index = first;
++    var coverage = 1.0;
++    loop {
++        if (index == 0u) { break; }
++        let offset = (index - 1u) * 3u;
++        let rectangle = bitcast<vec4<f32>>(rounded_clip_texel(offset));
++        let radii = bitcast<vec4<f32>>(rounded_clip_texel(offset + 1u));
++        let distance = quad_sdf(position, Bounds(rectangle.xy, rectangle.zw),
++            Corners(radii.x, radii.y, radii.z, radii.w));
++        coverage = min(coverage, saturate(0.5 - distance));
++        index = rounded_clip_texel(offset + 2u).x;
++    }
++    return coverage;
++}
++
++fn rounded_clip_color(color: vec4<f32>, coverage: f32) -> vec4<f32> {
++    if (globals.premultiplied_alpha != 0u) { return color * coverage; }
++    return vec4<f32>(color.rgb, color.a * coverage);
++}
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -96,6 +96,8 @@
+ struct SurfaceParams {
+     bounds: PodBounds,
+     content_mask: PodBounds,
++    rounded_clip: u32,
++    _clip_padding: [u32; 3],
+ }
+ 
+ #[repr(C)]
+@@ -130,8 +132,10 @@
+     blurred_scale: [f32; 2],
+     saturation: f32,
+     opacity: f32,
+-    bottom_fade: f32,
+-    _pad: f32,
++    rounded_clip: u32,
++    _pad: u32,
++    /// Top, right, bottom, left.
++    fades: [f32; 4],
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -147,6 +151,8 @@
+     st_position: Point<f32>,
+     color: Background,
+     bounds: Bounds<ScaledPixels>,
++    rounded_clip: u32,
++    clip_padding: u32,
+ }
+ 
+ pub struct WgpuSurfaceConfig {
+@@ -230,6 +236,9 @@
+     globals_buffer: wgpu::Buffer,
+     globals_bind_group: wgpu::BindGroup,
+     path_globals_bind_group: wgpu::BindGroup,
++    /// `Scene::rounded_clips`, 256 texels wide, bound with the globals.
++    rounded_clip_texture: wgpu::Texture,
++    rounded_clip_view: wgpu::TextureView,
+     instance_data: InstanceData,
+     path_intermediate_texture: Option<wgpu::Texture>,
+     path_intermediate_view: Option<wgpu::TextureView>,
+@@ -286,6 +295,53 @@
+     }
+ }
+ 
++/// Texels per row of the rounded clip table.
++const ROUNDED_CLIP_TEXTURE_WIDTH: u32 = 256;
++
++fn create_rounded_clip_texture(device: &wgpu::Device, height: u32) -> wgpu::Texture {
++    device.create_texture(&wgpu::TextureDescriptor {
++        label: Some("rounded_clips"),
++        size: wgpu::Extent3d { width: ROUNDED_CLIP_TEXTURE_WIDTH, height, depth_or_array_layers: 1 },
++        mip_level_count: 1,
++        sample_count: 1,
++        dimension: wgpu::TextureDimension::D2,
++        format: wgpu::TextureFormat::Rgba32Uint,
++        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
++        view_formats: &[],
++    })
++}
++
++/// The globals bind groups for primitives and for path rasterization, with the clip table.
++fn create_globals_bind_groups(
++    device: &wgpu::Device,
++    layout: &wgpu::BindGroupLayout,
++    globals_buffer: &wgpu::Buffer,
++    path_globals_offset: u64,
++    gamma_offset: u64,
++    rounded_clip_view: &wgpu::TextureView,
++) -> (wgpu::BindGroup, wgpu::BindGroup) {
++    let globals_size = std::mem::size_of::<GlobalParams>() as u64;
++    let gamma_size = std::mem::size_of::<GammaParams>() as u64;
++    let group = |label, offset| {
++        device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: Some(label),
++            layout,
++            entries: &[
++                wgpu::BindGroupEntry {
++                    binding: 0,
++                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: globals_buffer, offset, size: NonZeroU64::new(globals_size) }),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 1,
++                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: globals_buffer, offset: gamma_offset, size: NonZeroU64::new(gamma_size) }),
++                },
++                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(rounded_clip_view) },
++            ],
++        })
++    };
++    (group("globals_bind_group", 0), group("path_globals_bind_group", path_globals_offset))
++}
++
+ struct WgpuRendererCore {
+     resources: WgpuResources,
+     atlas: Arc<WgpuAtlas>,
+@@ -635,6 +691,17 @@
+                         },
+                         count: None,
+                     },
++                    // The rounded clip table (`Scene::rounded_clips`), three texels a clip.
++                    wgpu::BindGroupLayoutEntry {
++                        binding: 2,
++                        visibility: wgpu::ShaderStages::FRAGMENT,
++                        ty: wgpu::BindingType::Texture {
++                            sample_type: wgpu::TextureSampleType::Uint,
++                            view_dimension: wgpu::TextureViewDimension::D2,
++                            multisampled: false,
++                        },
++                        count: None,
++                    },
+                 ],
+             });
+ 
+@@ -1473,50 +1540,16 @@
+                 device.limits().min_storage_buffer_offset_alignment as u64,
+             )
+         };
+-        let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+-            label: Some("globals_bind_group"),
+-            layout: &bind_group_layouts.globals,
+-            entries: &[
+-                wgpu::BindGroupEntry {
+-                    binding: 0,
+-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+-                        buffer: &globals_buffer,
+-                        offset: 0,
+-                        size: NonZeroU64::new(globals_size),
+-                    }),
+-                },
+-                wgpu::BindGroupEntry {
+-                    binding: 1,
+-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+-                        buffer: &globals_buffer,
+-                        offset: gamma_offset,
+-                        size: NonZeroU64::new(gamma_size),
+-                    }),
+-                },
+-            ],
+-        });
+-        let path_globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+-            label: Some("path_globals_bind_group"),
+-            layout: &bind_group_layouts.globals,
+-            entries: &[
+-                wgpu::BindGroupEntry {
+-                    binding: 0,
+-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+-                        buffer: &globals_buffer,
+-                        offset: path_globals_offset,
+-                        size: NonZeroU64::new(globals_size),
+-                    }),
+-                },
+-                wgpu::BindGroupEntry {
+-                    binding: 1,
+-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+-                        buffer: &globals_buffer,
+-                        offset: gamma_offset,
+-                        size: NonZeroU64::new(gamma_size),
+-                    }),
+-                },
+-            ],
+-        });
++        let rounded_clip_texture = create_rounded_clip_texture(&device, 1);
++        let rounded_clip_view = rounded_clip_texture.create_view(&Default::default());
++        let (globals_bind_group, path_globals_bind_group) = create_globals_bind_groups(
++            &device,
++            &bind_group_layouts.globals,
++            &globals_buffer,
++            path_globals_offset,
++            gamma_offset,
++            &rounded_clip_view,
++        );
+         let max_texture_size = device.limits().max_texture_dimension_2d;
+ 
+         Self {
+@@ -1530,6 +1563,8 @@
+                 globals_buffer,
+                 globals_bind_group,
+                 path_globals_bind_group,
++                rounded_clip_texture,
++                rounded_clip_view,
+                 instance_data,
+                 path_intermediate_texture: None,
+                 path_intermediate_view: None,
+@@ -1601,6 +1636,54 @@
+         resources.path_msaa_view = path_msaa_view;
+     }
+ 
++    /// Writes the scene's rounded clips where the shaders read them, growing the table first
++    /// when it is too small (and shrinking it when it is far too big).
++    fn upload_rounded_clips(&mut self, scene: &Scene) -> Result<()> {
++        const TEXELS_PER_CLIP: usize = 3;
++        let height = ((scene.rounded_clips.len() * TEXELS_PER_CLIP).div_ceil(ROUNDED_CLIP_TEXTURE_WIDTH as usize).max(1) as u32).next_power_of_two();
++        anyhow::ensure!(height <= self.max_texture_size, "rounded clip table exceeds the texture limit");
++        let (path_offset, gamma_offset) = (self.path_globals_offset, self.gamma_offset);
++        let resources = self.resources_mut();
++        let current = resources.rounded_clip_texture.height();
++        if current < height || current > height.saturating_mul(4) {
++            resources.rounded_clip_texture = create_rounded_clip_texture(&resources.device, height);
++            resources.rounded_clip_view = resources.rounded_clip_texture.create_view(&Default::default());
++            let (globals, path_globals) = create_globals_bind_groups(
++                &resources.device,
++                &resources.bind_group_layouts.globals,
++                &resources.globals_buffer,
++                path_offset,
++                gamma_offset,
++                &resources.rounded_clip_view,
++            );
++            resources.globals_bind_group = globals;
++            resources.path_globals_bind_group = path_globals;
++        }
++        if scene.rounded_clips.is_empty() {
++            return Ok(());
++        }
++        let rows = (scene.rounded_clips.len() * TEXELS_PER_CLIP).div_ceil(ROUNDED_CLIP_TEXTURE_WIDTH as usize) as u32;
++        let row_bytes = ROUNDED_CLIP_TEXTURE_WIDTH as usize * 16;
++        let mut bytes = vec![0u8; rows as usize * row_bytes];
++        // SAFETY: `RoundedClipNode` is `repr(C)` and made of 4-byte fields with no padding.
++        let source = unsafe {
++            std::slice::from_raw_parts(scene.rounded_clips.as_ptr().cast::<u8>(), std::mem::size_of_val(scene.rounded_clips.as_slice()))
++        };
++        bytes[..source.len()].copy_from_slice(source);
++        resources.queue.write_texture(
++            wgpu::TexelCopyTextureInfo {
++                texture: &resources.rounded_clip_texture,
++                mip_level: 0,
++                origin: wgpu::Origin3d::ZERO,
++                aspect: wgpu::TextureAspect::All,
++            },
++            &bytes,
++            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row_bytes as u32), rows_per_image: Some(rows) },
++            wgpu::Extent3d { width: ROUNDED_CLIP_TEXTURE_WIDTH, height: rows, depth_or_array_layers: 1 },
++        );
++        Ok(())
++    }
++
+     fn render_frame(
+         &mut self,
+         scene: &Scene,
+@@ -1621,6 +1704,7 @@
+             self.max_texture_size
+         );
+ 
++        self.upload_rounded_clips(scene)?;
+         self.atlas.before_frame();
+         self.ensure_intermediate_textures(size);
+         self.retire_idle_backdrop_resources(scene);
+@@ -2124,8 +2208,9 @@
+             ],
+             saturation: blur.saturation,
+             opacity: blur.opacity,
+-            bottom_fade: blur.bottom_fade.0,
+-            _pad: 0.,
++            rounded_clip: blur.rounded_clip,
++            _pad: 0,
++            fades: [blur.fades.top.0, blur.fades.right.0, blur.fades.bottom.0, blur.fades.left.0],
+         };
+         let first_offset = slot as u64 * BACKDROP_PARAM_SLOTS_PER_BLUR * stride;
+         let horizontal_offset = first_offset;
+@@ -2451,6 +2536,8 @@
+                 st_position: v.st_position,
+                 color: path.color,
+                 bounds,
++                rounded_clip: path.rounded_clip,
++                clip_padding: 0,
+             }));
+         }
+ 
+@@ -3260,6 +3347,8 @@
+             border_color: color,
+             corner_radii: Corners::default(),
+             border_widths: Edges::default(),
++            rounded_clip: 0,
++            clip_padding: [0; 3],
+         }
+     }
+ 
+@@ -3409,9 +3498,9 @@
+ 
+     #[test]
+     fn webgl_record_sizes_match_shader_word_strides() {
+-        assert_eq!(std::mem::size_of::<Quad>(), 40 * 4);
++        assert_eq!(std::mem::size_of::<Quad>(), 44 * 4);
+         assert_eq!(std::mem::size_of::<Shadow>(), 28 * 4);
+-        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 26 * 4);
++        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 28 * 4);
+         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
+         assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
+         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
+@@ -3486,6 +3575,8 @@
+                 bottom: 32.0.into(),
+                 left: 33.0.into(),
+             },
++            rounded_clip: 37,
++            clip_padding: [0; 3],
+         };
+ 
+         let bytes = unsafe { WgpuRendererCore::instance_bytes(std::slice::from_ref(&quad)) };
+@@ -3533,6 +3624,10 @@
+                 31.0_f32.to_bits(),
+                 32.0_f32.to_bits(),
+                 33.0_f32.to_bits(),
++                37,
++                0,
++                0,
++                0,
+             ]
+         );
+     }
+--- a/crates/gpui_windows/src/shaders.hlsl
++++ b/crates/gpui_windows/src/shaders.hlsl
+@@ -507,6 +507,11 @@
+     Hsla border_color;
+     Corners corner_radii;
+     Edges border_widths;
++    // Rounded clips (scene.rs): not applied on DirectX yet; here so the stride matches.
++    uint rounded_clip;
++    uint clip_pad0;
++    uint clip_pad1;
++    uint clip_pad2;
+ };
+ 
+ struct QuadVertexOutput {

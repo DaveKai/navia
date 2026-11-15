@@ -1,0 +1,31 @@
+# Maintainer: @APP_MAINTAINER@
+# Rendered by build-release.sh. Repackages the release binary, the same one the .deb and .rpm carry.
+# For the AUR, change source to the published tarball's URL.
+pkgname=@APP_NAME@-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="@APP_SUMMARY@"
+arch=('@ARCH@')
+url=''
+license=('GPL-3.0-or-later')
+depends=('glibc' 'gcc-libs' 'alsa-lib' 'opus' 'libxkbcommon'
+         'vulkan-icd-loader' 'wayland')
+optdepends=('pipewire-alsa: audio output through PipeWire'
+            'libglvnd: OpenGL fallback when Vulkan is unavailable'
+            'vulkan-driver: GPU rendering')
+provides=('@APP_NAME@')
+conflicts=('@APP_NAME@')
+options=('!strip' '!debug')
+source=("@APP_NAME@-$pkgver-@ARCH@.tar.gz")
+sha256sums=('@SHA256@')
+
+package() {
+    install -Dm755 "$srcdir/@APP_NAME@" "$pkgdir/usr/bin/@APP_NAME@"
+    install -Dm644 "$srcdir/@APP_ID@.desktop" "$pkgdir/usr/share/applications/@APP_ID@.desktop"
+    install -Dm644 "$srcdir/@APP_ID@.metainfo.xml" "$pkgdir/usr/share/metainfo/@APP_ID@.metainfo.xml"
+    local icon
+    for icon in $(cd "$srcdir" && find icons -type f); do
+        install -Dm644 "$srcdir/$icon" "$pkgdir/usr/share/$icon"
+    done
+    install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/@APP_NAME@/LICENSE"
+}

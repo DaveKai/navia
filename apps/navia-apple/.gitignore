@@ -1,0 +1,7 @@
+# Generated from the local library by tools/make_sample.py. Contains real library data, so it stays local.
+SampleData/
+.build/
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate

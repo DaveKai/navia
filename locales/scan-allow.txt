@@ -1,0 +1,238 @@
+# Literals the scan flags that aren't user-visible text: ids, env vars, log lines, sample data.
+, $0.gainDb)) }.joined(separator: 
+\($0.name) \($0.artist)
+\($0.title) \($0.album)
+\($0.title) \($0.artist) \($0.album)
+AAC
+Added {count} songs to {name}
+Album
+\(albumCount(albums.count)) • \(songCount(albums.totalSongs))
+Albums
+All Results
+Artist
+Artists
+Audio-Technica ATH-M50x
+Beyerdynamic DT 770 Pro
+Browse
+built above
+CARGO_PKG_NAME
+CARGO_PKG_VERSION
+Charts
+{cond} {name}
+{count} Albums
+{count} matches
+{count} matches in {sampled} songs on this device
+{count} minutes
+{count} seconds
+{count} selected songs
+{count} songs
+{count} Songs
+{count} songs on this device
+{} dB
+Deutsch
+Discover
+Downloads
+English
+Equalizer
+\(error)
+Español
+Fc
+{field} {op_word} {value}
+Filter
+first sync
+FLAC
+Flat
+\(fmtDec(f / 1000, digits)) kHz
+\(fmtDec(value / 1e9, 1)) GB
+\(fmtInt(Int($0))) kbps
+\(fmtInt(Int(f.rounded()))) Hz
+\(fmtInt(Int((value / 1e6).rounded()))) MB
+\(fmtInt(max(1, Int((value / 1e3).rounded())))) KB
+\(formatDb(value)) dB
+ForYou
+Français
+Gain
+Genres
+{group}-{name}
+Hanken Grotesk
+Home
+HOME
+HS
+HSC
+{} Hz
+Hz
+\(index + 1)
+In-ear (sample)
+\(Int(profile.crossfeedAmount.rounded()))%
+{} kHz
+{kind}-{pos}
+known field
+{label} {cond}
+{label} {cond} {val}
+Liked
+Limit {count} songs
+)) limiter \(plan.limiter) balance \(plan.balance) mono \(plan.mono)
+Locales
+LS
+LSC
+{MESSAGE}
+Moondrop Aria
+Moondrop Blessing 2
+MP3
+{name}: {reason}
+\(name)Rows
+{name}.svg
+Navia
+navia: annotation refresh failed: {e}
+navia: art failed for \(key): \(error)
+NAVIA_BENCH_ROUTE
+navia: bundled fonts failed to load: {e}
+navia: can't reach the server
+navia: can't reach the server: {e}
+navia: {} complete in {:.1} s
+NAVIA_CONFIG_DIR
+navia: couldn't change a star: {e}
+navia: couldn't fetch a playlist: {e}
+navia: couldn't open the library: \(failure)
+navia: couldn't open the library for {keep_form_user}: {e}
+navia: couldn't save the password to the system keyring: {}
+navia: couldn't save the quality setting: {e}
+navia: couldn't save the quality setting: \(error)
+navia: couldn't save volume leveling: {e}
+navia: couldn't save volume leveling: \(error)
+navia: couldn't store a star: {e}
+Navia/\(current)
+NAVIA_DATA_DIR
+NAVIA_DISCORD
+navia: Discord unavailable: {e}
+navia: download failed: \(message)
+navia: download failed: {message}
+navia: downloads done={} in_progress={}
+navia: {e}
+navia: first list at {:.0} ms ({} rows)
+navia: library sync failed: {e}
+navia: lyrics rasterized {} lines in {:.0} ms
+navia: media controls unavailable: {e}
+navia: no audio output: {e}
+navia: no audio output: \(error)
+NAVIA_NO_MEM_TUNING
+NAVIA_PACKAGE_NAME
+Navia page error
+navia: playback: \(message)
+navia: playback: {message}
+navia: player offline={} waiting={} private={} engine_queue={} status={:?} pos={:.2}s title={:?} queue={} at={} repeat={} shuffle={} volume={:.0} muted={} rate={} device={:?} underrun={} rebuffer={} xruns={}
+navia: playlist sync failed: {e}
+NAVIA_READ_ONLY
+navia: read-only run, nothing is written to the server
+NAVIA_REPORT_PLAYS
+navia: report window={:.0} tokens_w={:.0} mode={:?} saved_dock={:.1} dock={:.1} main={:.1} bakes={}
+NAVIA_SAMPLE
+NAVIA_SCRIPT
+navia: script quit after {:.1} s
+NAVIA_SCROLL_BENCH
+Navia/server.env
+Navia server login
+Navia/session.json
+NAVIA_SMAPS_DUMP
+navia: smart preview matched={} shown={} sampled={} checkable={} unchecked={:?} sort_checked={} first={:?}
+NAVIA_SMART_RULES
+navia: sort/filter {} rows in {:.1} ms
+navia: station error: {message}
+navia: station={:?} live={:?} stream_title={:?} artist_line={:?}
+NAVIA_TEST_COVER_FILE
+NAVIA_TEST_COVER_PLAYLIST
+NAVIA_TEST_EXTERNAL
+NAVIA_TEST_NO_KEYRING
+NAVIA_TEST_PLAY_HISTORY
+NAVIA_TEST_RADIO
+NAVIA_TEST_REAL_OUTPUT
+navia: test run without NAVIA_TEST_SINK matching PIPEWIRE_NODE, so audio goes to an in-memory capture and no device
+NAVIA_TEST_SECRET_FILE
+NAVIA_TEST_SINK
+navia: the system keyring isn't available: {}
+navia: thumbs entries={} bytes={} decoded={}
+navia: waiting for the server: {message}
+NAVIA_WINDOW
+Navidrome
+Navidrome 0.58.0
+NAVIDROME_PASSWORD
+NAVIDROME_URL
+NAVIDROME_USER
+New
+not signed in
+not used
+Off with sample data.
+ON
+On because NAVIA_REPORT_PLAYS=1 is set.
+one entry
+OpenSubsonic 1.16.1
+open window
+Opus
+Original
+Over-ear (sample)
+ParametricEQ
+PEQ
+Pins
+PIPEWIRE_NODE
+\(pixels)-\(url.path)
+PK
+  – \(player.current?.artist ?? 
+Playlist
+))\(playlist.isOwned ? 
+: playlist.ownerName]))
+Playlists
+Preamp:
+preamp \(plan.preampDb) filters \(plan.filters.count) gains \(plan.filters.map { (String(format: 
+Radio
+random jump each frame
+\(raw)
+Recent
+{r} kbps
+[role="menu"], [role="dialog"]
+\(row + 1)
+\(rule.key)
+\(s / 60):\(String(format: 
+Sample data, for testing.
+Sample headphones
+Sample list with invented curves, or load an AutoEQ ParametricEQ.txt file.
+Sample speakers
+\(scheme)://cover/\(encoded)
+scroll 30 px/frame
+scroll 600 px/frame
+Search
+Sennheiser HD 600
+Sennheiser HD 650
+Sennheiser IE 600
+{server} · {api} · {}
+Settings
+\(shell.interfaceSize)%
+\(shell.interfaceSize)-\(shell.sessionEpoch)-\(shell.language)
+showing {shown} of {count} matches in {sampled} songs on this device
+{shown}{count} matches in a sample of {sampled} songs
+\(size.map(String.init) ?? 
+Smart
+smart-\(id ?? 
+SmartOther
+SmartOwn
+Songs
+\(songsAndLength(playlist.songCount, seconds: playlist.duration)) • \(playlist.isPublic ? L(
+songs-\(genre ?? 
+\(songTitle)\(artistName)
+Sony WH-1000XM4
+Source
+spawn art worker
+spawn lyric worker
+spawn row loader
+stream resolver
+\(String(year)) • 
+System default (sample)
+The server answered with HTTP 
+thumbnails decoded and cached: {}
+useNowPlaying needs a track
+usePlayer needs PlayerProvider
+{user}@{}
+Value
+WAYLAND_DISPLAY
+WAYLAND_SOCKET
+XDG_CONFIG_HOME
+XDG_RUNTIME_DIR

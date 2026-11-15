@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = ["apps/navia-gpui", "crates/airplay", "crates/navia-core", "crates/navia-integrations"]
+exclude = ["vendor"]
+
+[workspace.package]
+# Navia's version, the one source of truth: SemVer, a release is a git tag v<version>. tools/version.sh reads it for the Mac, Windows and Linux packages.
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false

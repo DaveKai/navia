@@ -1,0 +1,70 @@
+[package]
+name = "navia-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Navia's shared core: Navidrome client, local library, audio engine and play reporting."
+
+[dependencies]
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls", "http2", "charset", "system-proxy", "blocking"] }
+tokio = { version = "1.54", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+thiserror = "2"
+rand = "0.10"
+md5 = "0.8"
+url = "2"
+tracing = "0.1"
+async-trait = "0.1"
+rusqlite = { version = "=0.41.1", features = ["bundled", "hooks"] }
+directories = "6"
+unicode-normalization = "0.1"
+symphonia = { version = "=0.6.1", default-features = false, features = ["flac", "mp3", "aac", "alac", "pcm", "isomp4", "wav", "ogg", "mkv", "vorbis", "opt-simd", "id3v2"] }
+rubato = "=5.0.1"
+ringbuf = "=0.6.0"
+audioadapter-buffers = "=5.2.0"
+opusic-sys = { version = "=0.7.7", default-features = false, optional = true }
+cpal = "=0.18.2"
+tempfile = "3"
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+fast_image_resize = { version = "=6.1.0", features = ["image"] }
+# Lanyard's presence socket (Spotify friends). TLS through the same rustls, aws-lc-rs provider and
+# platform verifier that reqwest uses.
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# AirPlay output: the trimmed airplay2-rs protocol pieces (crates/airplay, GPL-3.0-or-later), mDNS
+# discovery in pure Rust (no Avahi or Bonjour library), local addresses to hide this machine's receiver.
+navia-airplay = { path = "../airplay" }
+mdns-sd = "=0.21.7"
+if-addrs = "0.15"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Output, sinks and the device watch on PipeWire or PulseAudio through the pulse protocol, pure
+# Rust (MIT): Navia's own stream (`audio::pulse`), so it is named as Navia and the server holds
+# its buffer. cpal's own pulse host is not used; cpal stays for ALSA when there is no server.
+pulseaudio = "=0.3.2"
+futures-executor = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The default output's stream latency (an AirPlay route picked in Control Center), which cpal's
+# timestamps leave out. Already in the tree through cpal.
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware"] }
+
+[target.'cfg(unix)'.dependencies]
+# Free disk space for the song cache (`statvfs`).
+libc = "0.2"
+
+[dev-dependencies]
+wiremock = "=0.6.5"
+
+[features]
+default = ["opus"]
+# Opus files decode natively through libopus. Without this, the player falls back to a server
+# transcode for them, which is what Apple builds do until libopus is built for them.
+opus = ["dep:opusic-sys"]
+# Links the system libopus by default. Enable this to build libopus from source (needs cmake).
+opus-bundled = ["opus", "opusic-sys/bundled"]

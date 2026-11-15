@@ -1,0 +1,60 @@
+[package]
+name = "navia-gpui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# GPUI is pinned to one revision of Zed, vendored by vendor/gpui/fetch-gpui.sh.
+# Wayland only: the X11 backend is compiled out, so libxcb and libxkbcommon-x11 are not linked.
+[dependencies]
+keyring = "4.2"
+gpui = { path = "../../vendor/gpui/zed/crates/gpui", default-features = false, features = ["font-kit", "wayland"] }
+gpui_platform = { path = "../../vendor/gpui/zed/crates/gpui_platform", features = ["font-kit", "wayland"] }
+unicode-segmentation = "1"
+rusqlite = { version = "=0.41.1", features = ["bundled"] }
+image = "=0.25.10"
+fast_image_resize = { version = "=6.1.0", features = ["image"] }
+serde_json = "1"
+anyhow = "1"
+futures = "0.3"
+md5 = "0.8"
+lofty = "0.22"
+cosmic-text = "=0.19.0"
+navia-core = { path = "../../crates/navia-core" }
+navia-integrations = { path = "../../crates/navia-integrations" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
+directories = "6"
+
+# Windows icon resource (build.rs). Not target-gated: build.rs compiles for every target, and
+# only acts when the target is Windows.
+[build-dependencies]
+embed-resource = "=3.0.12"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# GNOME's title bar double-click setting, read through the settings portal. The zbus already in
+# the build through navia-integrations, with the same features.
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+# The tray icon: a StatusNotifierItem with its menu (ksni, Unlicense), on the async-io zbus above.
+ksni = { version = "=0.3.7", default-features = false, features = ["async-io", "blocking"] }
+
+[target.'cfg(windows)'.dependencies]
+# The installer's hooks and, once a feed is configured, updates (Velopack, MIT). Its version
+# matches the vpk that packs the installer (packaging/windows/build-installer.sh).
+velopack = "=1.2.161"
+# Windows has no system libopus to link, so libopus is built from source there (cmake).
+navia-core = { path = "../../crates/navia-core", features = ["opus-bundled"] }
+# The tray icon in the notification area (tray-icon, MIT or Apache-2.0), with muda's menu.
+tray-icon = { version = "=0.26.1", default-features = false }
+# Open at login: the per-user Run key (autostart.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Registry", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+# The main window's HWND, which Windows' media controls (SMTC through souvlaki) require.
+raw-window-handle = "0.6"
+
+[target.'cfg(all(windows, target_arch = "aarch64"))'.dependencies]
+# libopus's ARM NEON code doesn't build here: its CPU check needs Microsoft's compiler, and its
+# CMake build without that check leaves out declarations. Plain C is fast enough for decoding.
+opusic-sys = { version = "=0.7.7", default-features = false, features = ["no-simd"] }
+
+[dev-dependencies]
+tempfile = "3"

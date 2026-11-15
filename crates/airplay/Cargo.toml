@@ -1,0 +1,47 @@
+[package]
+name = "navia-airplay"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+description = "AirPlay 2 sender protocol (pairing, RTSP, timing, ALAC/RTP), trimmed from airplay2-rs."
+
+[dependencies]
+tokio = { version = "1.54", features = ["rt", "net", "io-util", "time", "sync", "macros"] }
+async-trait = "0.1"
+futures = "0.3"
+tracing = "0.1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+plist = "1.6"
+rand = "0.8"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+curve25519-dalek = { version = "4.1", features = ["digest"] }
+chacha20poly1305 = "0.10"
+aes = "0.8"
+aes-gcm = "0.10"
+cbc = "0.1"
+ctr = "0.9"
+sha1 = "0.10"
+sha2 = "0.10"
+hkdf = "0.12"
+md-5 = "0.10"
+num-bigint = { version = "0.4", features = ["rand"] }
+zeroize = { version = "1.7", features = ["derive"] }
+subtle = "2.5"
+base64 = "0.22"
+socket2 = "0.5"
+alac-encoder = "0.3"
+
+[dev-dependencies]
+mockall = "0.12"
+hex = "0.4"
+proptest = "1.4"
+test-case = "3.3"
+tokio-test = "0.4"
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1.54", features = ["full"] }

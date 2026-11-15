@@ -1,0 +1,185 @@
+diff -ruN a/crates/gpui/src/platform/test/window.rs b/crates/gpui/src/platform/test/window.rs
+--- a/crates/gpui/src/platform/test/window.rs
++++ b/crates/gpui/src/platform/test/window.rs
+@@ -31,7 +31,7 @@
+     renderer: Option<Box<dyn PlatformHeadlessRenderer>>,
+     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
+     close_callback: Option<Box<dyn FnOnce()>>,
+-    hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
++    hit_test_window_control_callback: Option<Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>>,
+     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
+     active_status_change_callback: Option<Box<dyn FnMut(bool)>>,
+     visibility: WindowVisibility,
+@@ -547,7 +547,7 @@
+         self.0.lock().close_callback = Some(callback);
+     }
+ 
+-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
++    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>) {
+         self.0.lock().hit_test_window_control_callback = Some(callback);
+     }
+ 
+diff -ruN a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -1322,7 +1322,10 @@
+     /// outside of any window update.
+     fn on_display_changed(&self, callback: Box<dyn FnMut()>);
+     fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>);
+-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>);
++    /// The callback answers which window control area is at a point in the window, from the last
++    /// frame's hitboxes at that point (not the last mouse position, which can lag the platform's
++    /// hit test).
++    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>);
+     fn on_close(&self, callback: Box<dyn FnOnce()>);
+     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
+     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
+diff -ruN a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -2294,11 +2294,14 @@
+         });
+         platform_window.on_hit_test_window_control({
+             let mut cx = cx.to_async();
+-            Box::new(move || {
++            Box::new(move |position| {
+                 handle
+                     .update(&mut cx, |_, window, _cx| {
++                        // Hit-test the point the platform asks about: the last mouse move can be
++                        // from before the pointer reached a control inside a drag area.
++                        let hit_test = window.rendered_frame.hit_test(position);
+                         for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
+-                            if window.mouse_hit_test.ids.contains(&hitbox.id) {
++                            if hit_test.ids.contains(&hitbox.id) {
+                                 return Some(*area);
+                             }
+                         }
+diff -ruN a/crates/gpui_ios/src/ios/window.rs b/crates/gpui_ios/src/ios/window.rs
+--- a/crates/gpui_ios/src/ios/window.rs
++++ b/crates/gpui_ios/src/ios/window.rs
+@@ -275,7 +275,7 @@
+     /// Callback for should close
+     should_close_callback: CallbackSlot<Box<dyn FnMut() -> bool>>,
+     /// Callback for hit test
+-    hit_test_callback: CallbackSlot<Box<dyn FnMut() -> Option<WindowControlArea>>>,
++    hit_test_callback: CallbackSlot<Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>>,
+     /// Callback for close
+     close_callback: CallbackSlot<Box<dyn FnOnce()>>,
+     /// Callback for appearance changes
+@@ -992,7 +992,7 @@
+         self.should_close_callback.set(callback);
+     }
+ 
+-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
++    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>) {
+         self.hit_test_callback.set(callback);
+     }
+ 
+diff -ruN a/crates/gpui_linux/src/linux/headless/window.rs b/crates/gpui_linux/src/linux/headless/window.rs
+--- a/crates/gpui_linux/src/linux/headless/window.rs
++++ b/crates/gpui_linux/src/linux/headless/window.rs
+@@ -185,7 +185,7 @@
+ 
+     fn on_close(&self, _callback: Box<dyn FnOnce()>) {}
+ 
+-    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
++    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>) {
+     }
+ 
+     fn on_appearance_changed(&self, _callback: Box<dyn FnMut()>) {}
+diff -ruN a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -2028,7 +2028,7 @@
+         self.0.callbacks.borrow_mut().close = Some(callback);
+     }
+ 
+-    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
++    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>) {
+     }
+ 
+     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
+diff -ruN a/crates/gpui_linux/src/linux/x11/window.rs b/crates/gpui_linux/src/linux/x11/window.rs
+--- a/crates/gpui_linux/src/linux/x11/window.rs
++++ b/crates/gpui_linux/src/linux/x11/window.rs
+@@ -1737,7 +1737,7 @@
+         self.0.callbacks.borrow_mut().close = Some(callback);
+     }
+ 
+-    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
++    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>) {
+     }
+ 
+     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
+diff -ruN a/crates/gpui_macos/src/window.rs b/crates/gpui_macos/src/window.rs
+--- a/crates/gpui_macos/src/window.rs
++++ b/crates/gpui_macos/src/window.rs
+@@ -2080,7 +2080,7 @@
+         self.0.as_ref().lock().close_callback = Some(callback);
+     }
+ 
+-    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
++    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>) {
+     }
+ 
+     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
+diff -ruN a/crates/gpui_web/src/window.rs b/crates/gpui_web/src/window.rs
+--- a/crates/gpui_web/src/window.rs
++++ b/crates/gpui_web/src/window.rs
+@@ -32,7 +32,7 @@
+     pub(crate) should_close: Option<Box<dyn FnMut() -> bool>>,
+     pub(crate) close: Option<Box<dyn FnOnce()>>,
+     pub(crate) appearance_changed: Option<Box<dyn FnMut()>>,
+-    pub(crate) hit_test_window_control: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
++    pub(crate) hit_test_window_control: Option<Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>>,
+ }
+ 
+ pub(crate) struct WebWindowMutableState {
+@@ -983,7 +983,7 @@
+         self.inner.callbacks.borrow_mut().close = Some(callback);
+     }
+ 
+-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
++    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>) {
+         self.inner.callbacks.borrow_mut().hit_test_window_control = Some(callback);
+     }
+ 
+diff -ruN a/crates/gpui_windows/src/events.rs b/crates/gpui_windows/src/events.rs
+--- a/crates/gpui_windows/src/events.rs
++++ b/crates/gpui_windows/src/events.rs
+@@ -970,7 +970,13 @@
+ 
+         let callback = self.state.callbacks.hit_test_window_control.take();
+         let drag_area = if let Some(mut callback) = callback {
+-            let area = callback();
++            let mut point = POINT {
++                x: lparam.signed_loword().into(),
++                y: lparam.signed_hiword().into(),
++            };
++            unsafe { ScreenToClient(handle, &mut point).ok().log_err() };
++            let scale_factor = self.state.scale_factor.get();
++            let area = callback(logical_point(point.x as f32, point.y as f32, scale_factor));
+             self.state
+                 .callbacks
+                 .hit_test_window_control
+diff -ruN a/crates/gpui_windows/src/window.rs b/crates/gpui_windows/src/window.rs
+--- a/crates/gpui_windows/src/window.rs
++++ b/crates/gpui_windows/src/window.rs
+@@ -408,7 +408,7 @@
+     pub(crate) display_changed: Cell<Option<Box<dyn FnMut()>>>,
+     pub(crate) should_close: Cell<Option<Box<dyn FnMut() -> bool>>>,
+     pub(crate) close: Cell<Option<Box<dyn FnOnce()>>>,
+-    pub(crate) hit_test_window_control: Cell<Option<Box<dyn FnMut() -> Option<WindowControlArea>>>>,
++    pub(crate) hit_test_window_control: Cell<Option<Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>>>,
+     pub(crate) appearance_changed: Cell<Option<Box<dyn FnMut()>>>,
+ }
+ 
+@@ -1023,7 +1023,7 @@
+         self.state.callbacks.close.set(Some(callback));
+     }
+ 
+-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
++    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>) {
+         self.0
+             .state
+             .callbacks

@@ -1,0 +1,465 @@
+Follow the system's fontconfig settings when rasterizing text on Linux and FreeBSD.
+
+GPUI's cosmic-text/swash path always hinted, always recommended subpixel rendering and
+took the subpixel order only from wl_output / Xft.rgba. This asks fontconfig (opened at
+runtime through yeslogic-fontconfig-sys's dlopen feature, so nothing new is linked) what it
+would give a renderer for each family, per Qt and cairo, and applies it:
+  antialias false        -> grayscale mask thresholded to 1 bit (swash can't do mono)
+  rgba none/unknown      -> TextRenderingMode::Grayscale
+  rgba rgb/bgr           -> subpixel in that order, over the display's report
+  rgba vrgb/vbgr         -> grayscale (swash has no vertical subpixel format)
+  rgba unset             -> unchanged: subpixel, display's order
+  hinting false / hintstyle none -> swash hinting off; slight/medium/full -> on (swash is binary)
+No libfontconfig, or other platforms: the old behaviour. An application's explicit
+text_rendering_mode still wins over the recommendation.
+
+--- a/crates/gpui_wgpu/Cargo.toml
++++ b/crates/gpui_wgpu/Cargo.toml
+@@ -42,6 +42,8 @@
+ font-kit = { workspace = true, optional = true }
+ 
+ [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
++# Opened at runtime, so the binary doesn't link libfontconfig: text rendering settings.
++yeslogic-fontconfig-sys = { version = "6.0", features = ["dlopen"] }
+ wgpu = { workspace = true, features = ["std", "metal", "gles", "vulkan", "wgsl", "webgpu"] }
+ 
+ [target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
+--- a/crates/gpui_wgpu/src/cosmic_text_system.rs
++++ b/crates/gpui_wgpu/src/cosmic_text_system.rs
+@@ -4,6 +4,7 @@
+     Attrs, AttrsList, Ellipsize, Family, Font as CosmicTextFont,
+     FontFeatures as CosmicFontFeatures, FontSystem, ShapeBuffer, ShapeLine, Stretch, Style, Weight,
+ };
++use crate::FontRenderingSettings;
+ use gpui::{
+     Bounds, DevicePixels, FallbackFontClass, Font, FontFallbacks, FontFeatures, FontId,
+     FontMetrics, FontRun, GlyphId, IsZero as _, LineLayout, MissingGlyph, MissingGlyphSink, Pixels,
+@@ -68,6 +69,8 @@
+     /// resolved at load time so `layout_line` shares one chain across faces.
+     /// `Arc` keeps clone cheap on the per-run hot path.
+     user_fallback_chain: Arc<[(FontId, SharedString)]>,
++    /// The font configuration's antialiasing, hinting and subpixel order for this family.
++    rendering: FontRenderingSettings,
+ }
+ 
+ struct FontMatchProperties {
+@@ -276,10 +279,10 @@
+ 
+     fn recommended_rendering_mode(
+         &self,
+-        _font_id: FontId,
++        font_id: FontId,
+         _font_size: Pixels,
+     ) -> TextRenderingMode {
+-        TextRenderingMode::Subpixel
++        self.0.read().loaded_font(font_id).rendering.rendering_mode()
+     }
+ }
+ 
+@@ -439,6 +442,7 @@
+                 features: cosmic_features.clone(),
+                 is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
+                 user_fallback_chain: Arc::clone(&user_fallback_chain),
++                rendering: FontRenderingSettings::for_family(&name),
+             });
+             self.loaded_font_ids_by_key.insert(key, font_id);
+         }
+@@ -515,6 +519,7 @@
+         params: &RenderGlyphParams,
+     ) -> Result<swash::scale::image::Image> {
+         let loaded_font = &self.loaded_fonts[params.font_id.0];
++        let rendering = loaded_font.rendering;
+         let font_ref = loaded_font.font.as_swash();
+         let pixel_size = f32::from(params.font_size);
+ 
+@@ -527,7 +532,7 @@
+             .swash_scale_context
+             .builder(font_ref)
+             .size(pixel_size * params.scale_factor)
+-            .hint(true)
++            .hint(rendering.hinting)
+             .build();
+ 
+         let sources: &[Source] = if params.is_emoji {
+@@ -541,7 +546,9 @@
+         };
+ 
+         let mut renderer = Render::new(sources);
+-        if params.subpixel_rendering {
++        // With antialiasing off, subpixel coverage would be thresholded per channel
++        // into colored edges, so render the plain mask that gets thresholded below.
++        if params.subpixel_rendering && rendering.antialias {
+             // There seems to be a bug in Swash where the B and R values are swapped.
+             renderer
+                 .format(Format::subpixel_bgra())
+@@ -551,9 +558,17 @@
+         }
+ 
+         let glyph_id: u16 = params.glyph_id.0.try_into()?;
+-        renderer
++        let mut image = renderer
+             .render(&mut scaler, glyph_id)
+-            .with_context(|| format!("unable to render glyph via swash for {params:?}"))
++            .with_context(|| format!("unable to render glyph via swash for {params:?}"))?;
++        // swash always antialiases; keeping only pixels at least half covered gives
++        // the bilevel glyphs that `antialias` false asks for.
++        if !rendering.antialias && image.content == swash::scale::image::Content::Mask {
++            for coverage in &mut image.data {
++                *coverage = if *coverage >= 128 { 255 } else { 0 };
++            }
++        }
++        Ok(image)
+     }
+ 
+     /// This is used when cosmic_text has chosen a fallback font instead of using the requested
+@@ -588,6 +603,11 @@
+                 features: CosmicFontFeatures::new(),
+                 is_known_emoji_font: check_is_known_emoji_font(&face.post_script_name),
+                 user_fallback_chain: Arc::from(Vec::new()),
++                rendering: face
++                    .families
++                    .first()
++                    .map(|(family, _)| FontRenderingSettings::for_family(family))
++                    .unwrap_or_else(FontRenderingSettings::system),
+             });
+ 
+             Ok(font_id)
+--- a/crates/gpui_wgpu/src/font_rendering_settings.rs
++++ b/crates/gpui_wgpu/src/font_rendering_settings.rs
+@@ -0,0 +1,285 @@
++//! Text rendering settings from the system's font configuration.
++//!
++//! On Linux and FreeBSD the desktop's antialiasing, subpixel order and hinting
++//! choices live in fontconfig (KDE's font settings write them there, and
++//! distributions ship defaults in `/etc/fonts/conf.d`). This module asks
++//! fontconfig what it would hand a renderer for a family, the way Qt and cairo
++//! do, and maps the answer onto what swash and the subpixel shader can do:
++//!
++//! | fontconfig                         | rendering                                   |
++//! |------------------------------------|---------------------------------------------|
++//! | `antialias` false                  | grayscale mask thresholded to 1 bit         |
++//! | `rgba` none or unknown             | [`TextRenderingMode::Grayscale`]            |
++//! | `rgba` rgb or bgr                  | subpixel in that order, over the display's  |
++//! | `rgba` vrgb or vbgr                | grayscale: swash has no vertical subpixel   |
++//! | `rgba` not set                     | subpixel in the order the display reports   |
++//! | `hinting` false or `hintstyle` none| swash hinting off                           |
++//! | `hintstyle` slight, medium, full   | swash hinting on                            |
++//!
++//! swash has a single hinting mode, so slight, medium and full all map to it.
++//! `lcdfilter` is not applied: swash's subpixel format uses its own filter.
++//!
++//! libfontconfig is opened at runtime. Without it, or on other platforms, the
++//! defaults keep the previous behaviour: antialiased, hinted, subpixel.
++
++use gpui::TextRenderingMode;
++
++/// The subpixel arrangement fontconfig's `rgba` names.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++pub enum SubpixelOrder {
++    /// `none` or `unknown`: no subpixel rendering.
++    None,
++    Rgb,
++    Bgr,
++    VerticalRgb,
++    VerticalBgr,
++}
++
++/// How glyphs of one family should be rasterized, as the font configuration says.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++pub struct FontRenderingSettings {
++    /// fontconfig `antialias`.
++    pub antialias: bool,
++    /// fontconfig `hinting`, and `hintstyle` other than none.
++    pub hinting: bool,
++    /// fontconfig `rgba`, when the configuration sets it. `None` leaves the order
++    /// to the display.
++    pub subpixel_order: Option<SubpixelOrder>,
++}
++
++impl Default for FontRenderingSettings {
++    fn default() -> Self {
++        Self {
++            antialias: true,
++            hinting: true,
++            subpixel_order: None,
++        }
++    }
++}
++
++impl FontRenderingSettings {
++    /// The settings for the default font, what `fc-match` with no pattern resolves.
++    /// Queried once per process.
++    pub fn system() -> Self {
++        imp::system()
++    }
++
++    /// The settings for one family, so rules that target a family apply. The font
++    /// doesn't have to be installed: the query uses the family name alone. Cached.
++    pub fn for_family(family: &str) -> Self {
++        imp::for_family(family)
++    }
++
++    /// The rendering mode to recommend when the application leaves it to the platform.
++    pub fn rendering_mode(&self) -> TextRenderingMode {
++        if !self.antialias {
++            return TextRenderingMode::Grayscale;
++        }
++        match self.subpixel_order {
++            None | Some(SubpixelOrder::Rgb | SubpixelOrder::Bgr) => TextRenderingMode::Subpixel,
++            Some(
++                SubpixelOrder::None | SubpixelOrder::VerticalRgb | SubpixelOrder::VerticalBgr,
++            ) => TextRenderingMode::Grayscale,
++        }
++    }
++
++    /// Whether subpixels are blue, green, red, when the configuration says so.
++    /// `None` means the display's report should decide.
++    pub fn is_bgr(&self) -> Option<bool> {
++        match self.subpixel_order {
++            Some(SubpixelOrder::Rgb) => Some(false),
++            Some(SubpixelOrder::Bgr) => Some(true),
++            _ => None,
++        }
++    }
++}
++
++#[cfg(any(target_os = "linux", target_os = "freebsd"))]
++mod imp {
++    use super::{FontRenderingSettings, SubpixelOrder};
++    use collections::HashMap;
++    use fontconfig_sys::{
++        FcConfig, FcMatchPattern, FcPattern, FcResultMatch, constants::*, statics::LIB_RESULT,
++    };
++    use parking_lot::Mutex;
++    use std::{
++        ffi::{CStr, CString, c_int},
++        sync::LazyLock,
++    };
++
++    struct Query {
++        /// Loaded without scanning fonts: the settings need the rules, not the fonts.
++        config: *mut FcConfig,
++        system: Option<FontRenderingSettings>,
++        families: HashMap<String, FontRenderingSettings>,
++    }
++
++    // SAFETY: the config is only touched while the mutex is held.
++    unsafe impl Send for Query {}
++
++    static QUERY: LazyLock<Mutex<Option<Query>>> = LazyLock::new(|| {
++        let fc = match LIB_RESULT.as_ref() {
++            Ok(fc) => fc,
++            Err(error) => {
++                log::info!("fontconfig not available ({error}), using default text rendering");
++                return Mutex::new(None);
++            }
++        };
++        // SAFETY: FcInitLoadConfig has no preconditions; a null result is handled.
++        let config = unsafe { (fc.FcInitLoadConfig)() };
++        if config.is_null() {
++            log::warn!("fontconfig could not load its configuration, using default text rendering");
++            return Mutex::new(None);
++        }
++        Mutex::new(Some(Query {
++            config,
++            system: None,
++            families: HashMap::default(),
++        }))
++    });
++
++    pub(super) fn system() -> FontRenderingSettings {
++        let mut query = QUERY.lock();
++        let Some(query) = query.as_mut() else {
++            return FontRenderingSettings::default();
++        };
++        *query.system.get_or_insert_with(|| {
++            let settings = resolve(query.config, None);
++            log::info!("text rendering from fontconfig: {settings:?}");
++            settings
++        })
++    }
++
++    pub(super) fn for_family(family: &str) -> FontRenderingSettings {
++        let mut query = QUERY.lock();
++        let Some(query) = query.as_mut() else {
++            return FontRenderingSettings::default();
++        };
++        if let Some(settings) = query.families.get(family) {
++            return *settings;
++        }
++        let settings = match CString::new(family) {
++            Ok(name) => resolve(query.config, Some(&name)),
++            Err(_) => resolve(query.config, None),
++        };
++        query.families.insert(family.to_string(), settings);
++        settings
++    }
++
++    /// Runs the substitutions a renderer would see for `family`: the pattern rules,
++    /// fontconfig's defaults, then the font rules for a scalable outline font of
++    /// that family (`FcFontRenderPrepare`, as cairo does for fonts it didn't get
++    /// from fontconfig). With no family, the default family is resolved first.
++    fn resolve(config: *mut FcConfig, family: Option<&CStr>) -> FontRenderingSettings {
++        let Ok(fc) = LIB_RESULT.as_ref() else {
++            return FontRenderingSettings::default();
++        };
++        // SAFETY: every pattern created here is destroyed before returning, and
++        // strings read from a pattern are copied before it is destroyed.
++        unsafe {
++            let pattern = (fc.FcPatternCreate)();
++            if pattern.is_null() {
++                return FontRenderingSettings::default();
++            }
++            if let Some(family) = family {
++                (fc.FcPatternAddString)(pattern, FC_FAMILY.as_ptr(), family.as_ptr().cast());
++            }
++            (fc.FcConfigSubstitute)(config, pattern, FcMatchPattern);
++            (fc.FcDefaultSubstitute)(pattern);
++
++            let font = (fc.FcPatternCreate)();
++            if font.is_null() {
++                (fc.FcPatternDestroy)(pattern);
++                return FontRenderingSettings::default();
++            }
++            let mut name = std::ptr::null_mut();
++            if (fc.FcPatternGetString)(pattern, FC_FAMILY.as_ptr(), 0, &mut name) == FcResultMatch
++                && !name.is_null()
++            {
++                (fc.FcPatternAddString)(font, FC_FAMILY.as_ptr(), name);
++            }
++            (fc.FcPatternAddBool)(font, FC_OUTLINE.as_ptr(), 1);
++            (fc.FcPatternAddBool)(font, FC_SCALABLE.as_ptr(), 1);
++
++            let prepared = (fc.FcFontRenderPrepare)(config, pattern, font);
++            (fc.FcPatternDestroy)(font);
++            (fc.FcPatternDestroy)(pattern);
++            if prepared.is_null() {
++                return FontRenderingSettings::default();
++            }
++            let settings = read(prepared);
++            (fc.FcPatternDestroy)(prepared);
++            settings
++        }
++    }
++
++    /// SAFETY: `pattern` must be a valid fontconfig pattern.
++    unsafe fn read(pattern: *mut FcPattern) -> FontRenderingSettings {
++        let Ok(fc) = LIB_RESULT.as_ref() else {
++            return FontRenderingSettings::default();
++        };
++        let get_bool = |object: &CStr| {
++            let mut value = 0;
++            let found =
++                unsafe { (fc.FcPatternGetBool)(pattern, object.as_ptr(), 0, &mut value) };
++            (found == FcResultMatch).then_some(value != 0)
++        };
++        let get_int = |object: &CStr| {
++            let mut value: c_int = 0;
++            let found =
++                unsafe { (fc.FcPatternGetInteger)(pattern, object.as_ptr(), 0, &mut value) };
++            (found == FcResultMatch).then_some(value)
++        };
++
++        let hintstyle = get_int(FC_HINT_STYLE).unwrap_or(FC_HINT_FULL);
++        FontRenderingSettings {
++            antialias: get_bool(FC_ANTIALIAS).unwrap_or(true),
++            hinting: get_bool(FC_HINTING).unwrap_or(true) && hintstyle != FC_HINT_NONE,
++            subpixel_order: get_int(FC_RGBA).map(|rgba| match rgba {
++                FC_RGBA_RGB => SubpixelOrder::Rgb,
++                FC_RGBA_BGR => SubpixelOrder::Bgr,
++                FC_RGBA_VRGB => SubpixelOrder::VerticalRgb,
++                FC_RGBA_VBGR => SubpixelOrder::VerticalBgr,
++                _ => SubpixelOrder::None,
++            }),
++        }
++    }
++}
++
++#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
++mod imp {
++    use super::FontRenderingSettings;
++
++    pub(super) fn system() -> FontRenderingSettings {
++        FontRenderingSettings::default()
++    }
++
++    pub(super) fn for_family(_family: &str) -> FontRenderingSettings {
++        FontRenderingSettings::default()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn rendering_mode_follows_rgba_and_antialias() {
++        let with = |antialias, subpixel_order| FontRenderingSettings {
++            antialias,
++            hinting: true,
++            subpixel_order,
++        };
++        use SubpixelOrder::*;
++        use TextRenderingMode::{Grayscale, Subpixel};
++        assert_eq!(with(true, None).rendering_mode(), Subpixel);
++        assert_eq!(with(true, Some(Rgb)).rendering_mode(), Subpixel);
++        assert_eq!(with(true, Some(Bgr)).rendering_mode(), Subpixel);
++        assert_eq!(with(true, Some(SubpixelOrder::None)).rendering_mode(), Grayscale);
++        assert_eq!(with(true, Some(VerticalRgb)).rendering_mode(), Grayscale);
++        assert_eq!(with(false, Some(Rgb)).rendering_mode(), Grayscale);
++        assert_eq!(with(true, Some(Bgr)).is_bgr(), Some(true));
++        assert_eq!(with(true, Some(Rgb)).is_bgr(), Some(false));
++        assert_eq!(with(true, None).is_bgr(), Option::None);
++    }
++}
+--- a/crates/gpui_wgpu/src/gpui_wgpu.rs
++++ b/crates/gpui_wgpu/src/gpui_wgpu.rs
+@@ -1,9 +1,11 @@
+ mod cosmic_text_system;
++mod font_rendering_settings;
+ mod wgpu_atlas;
+ mod wgpu_context;
+ mod wgpu_renderer;
+ 
+ pub use cosmic_text_system::*;
++pub use font_rendering_settings::*;
+ pub use wgpu;
+ pub use wgpu_atlas::*;
+ pub use wgpu_context::*;
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -639,7 +639,7 @@
+         let max_texture_size = context.device.limits().max_texture_dimension_2d;
+         let core = WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode);
+ 
+-        Ok(Self {
++        let mut renderer = Self {
+             context: gpu_context,
+             compositor_gpu,
+             state: RendererState::Ready { surface, core },
+@@ -654,7 +654,10 @@
+             observed_error_generation: 0,
+             last_surface_error: None,
+             needs_redraw: false,
+-        })
++        };
++        // Until the display reports its subpixel order, the font configuration's applies.
++        renderer.set_subpixel_layout(false);
++        Ok(renderer)
+     }
+ }
+ 
+@@ -1298,7 +1301,12 @@
+         }
+     }
+ 
+-    pub fn set_subpixel_layout(&mut self, is_bgr: bool) {
++    /// Sets the subpixel order the display reports. The font configuration's `rgba`
++    /// wins when it names an order, as in other toolkits; see [`crate::FontRenderingSettings`].
++    pub fn set_subpixel_layout(&mut self, display_is_bgr: bool) {
++        let is_bgr = crate::FontRenderingSettings::system()
++            .is_bgr()
++            .unwrap_or(display_is_bgr);
+         self.is_bgr = is_bgr;
+         if let Some(core) = self.core_mut() {
+             core.is_bgr = is_bgr;

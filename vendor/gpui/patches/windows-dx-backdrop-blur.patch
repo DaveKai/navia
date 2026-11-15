@@ -1,0 +1,755 @@
+diff -ruN a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -1330,6 +1330,10 @@
+     fn schedule_frame(&self) {}
+     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+     fn is_subpixel_rendering_supported(&self) -> bool;
++    /// Whether the renderer draws [`crate::BackdropBlur`]s. Where it doesn't, they draw nothing.
++    fn supports_backdrop_blur(&self) -> bool {
++        false
++    }
+ 
+     // macOS specific methods
+     fn get_title(&self) -> String {
+diff -ruN a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -7373,6 +7373,12 @@
+         }
+     }
+ 
++    /// Whether this window's renderer draws backdrop blurs ([`Window::paint_backdrop_blur`]).
++    /// Where it doesn't, they draw nothing, so paint a stand-in fill instead.
++    pub fn supports_backdrop_blur(&self) -> bool {
++        self.platform_window.supports_backdrop_blur()
++    }
++
+     /// Read information about the GPU backing this window.
+     /// Currently returns None on Mac and Windows.
+     pub fn gpu_specs(&self) -> Option<GpuSpecs> {
+diff -ruN a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -1941,6 +1941,11 @@
+         self.borrow().background_appearance
+     }
+ 
++    // The wgpu renderer always has the blur passes.
++    fn supports_backdrop_blur(&self) -> bool {
++        true
++    }
++
+     fn is_subpixel_rendering_supported(&self) -> bool {
+         let client = self.borrow().client.get_client();
+         let state = client.borrow();
+diff -ruN a/crates/gpui_windows/build.rs b/crates/gpui_windows/build.rs
+--- a/crates/gpui_windows/build.rs
++++ b/crates/gpui_windows/build.rs
+@@ -49,6 +49,8 @@
+             "monochrome_sprite",
+             "subpixel_sprite",
+             "polychrome_sprite",
++            "backdrop_blur_pass",
++            "backdrop_blur",
+         ];
+ 
+         let rust_binding_path = format!("{}/shaders_bytes.rs", out_dir);
+diff -ruN a/crates/gpui_windows/src/directx_renderer/backdrop_blur.rs b/crates/gpui_windows/src/directx_renderer/backdrop_blur.rs
+--- a/crates/gpui_windows/src/directx_renderer/backdrop_blur.rs
++++ b/crates/gpui_windows/src/directx_renderer/backdrop_blur.rs
+@@ -0,0 +1,425 @@
++// Ported from Finityno/zed PR #74 (gpui_windows backdrop blur, Apache-2.0), adapted to this
++// pin: one plane and no depth prepass, rounded clips (t2) and per-edge fades in the composite,
++// and the pipeline built with the renderer so a failure is known before anything is drawn.
++use super::*;
++
++/// Drawn frames without a backdrop blur after which the scratch textures are released.
++const BACKDROP_BLUR_IDLE_FRAMES: u32 = 120;
++/// Scratch texture sets kept, one per bucketed region size. A frame with more blurs of distinct
++/// sizes than this recreates the least recently used set.
++const MAX_BACKDROP_TEXTURES: usize = 4;
++/// Region sizes are rounded up to this many pixels before looking for a scratch set, so a
++/// popover animating its size reuses one set instead of creating textures every frame.
++const BACKDROP_TEXTURE_GRANULARITY: u32 = 64;
++/// The largest gaussian standard deviation run, in device pixels. Beyond it the frost no longer
++/// changes visibly while the work keeps growing.
++const MAX_BACKDROP_BLUR_SIGMA: f32 = 64.;
++/// `backdrop_taps` in shaders.hlsl: two folded tap pairs per vector, enough for the 3-sigma
++/// reach of [`MAX_BACKDROP_BLUR_SIGMA`].
++const BACKDROP_TAP_VECTORS: usize = 48;
++
++/// `cbuffer BackdropBlurParams` (b2) in shaders.hlsl. Every field group fills whole 16-byte
++/// registers, so no field straddles one.
++#[derive(Clone, Copy)]
++#[repr(C)]
++struct BackdropBlurParams {
++    bounds: [f32; 4],
++    corner_radii: [f32; 4],
++    content_mask: [f32; 4],
++    region_origin: [f32; 2],
++    region_size: [f32; 2],
++    source_size: [f32; 2],
++    source_extent: [f32; 2],
++    direction: [f32; 2],
++    scale: [f32; 2],
++    saturation: f32,
++    opacity: f32,
++    center_weight: f32,
++    tap_pair_count: u32,
++    /// Top, right, bottom, left: how far in from each edge the effect fades out (0: hard).
++    fades: [f32; 4],
++    /// One-based index into the rounded clips (t2), or 0.
++    rounded_clip: u32,
++    _pad: [u32; 3],
++    taps: [[f32; 4]; BACKDROP_TAP_VECTORS],
++}
++
++const _: () = assert!(std::mem::size_of::<BackdropBlurParams>() == (9 + BACKDROP_TAP_VECTORS) * 16);
++
++fn bounds_to_array(bounds: &Bounds<ScaledPixels>) -> [f32; 4] {
++    [bounds.origin.x.0, bounds.origin.y.0, bounds.size.width.0, bounds.size.height.0]
++}
++
++/// Writes the normalized gaussian for `sigma` as folded tap pairs: taps `k` and `k + 1` (odd
++/// `k`) become one bilinear sample between them carrying both weights, which halves the samples
++/// of every pass. Returns the centre tap's weight and the number of pairs written.
++fn gaussian_tap_pairs(sigma: f32, taps: &mut [[f32; 4]; BACKDROP_TAP_VECTORS]) -> (f32, u32) {
++    let radius = ((sigma * 3.).ceil() as usize).min(BACKDROP_TAP_VECTORS * 4);
++    let weight = |k: usize| {
++        if k > radius {
++            0.
++        } else {
++            let k = k as f32;
++            (-(k * k) / (2. * sigma * sigma)).exp()
++        }
++    };
++    let total = 1. + 2. * (1..=radius).map(weight).sum::<f32>();
++    let pair_count = radius.div_ceil(2);
++    for pair in 0..pair_count {
++        let near = 2 * pair + 1;
++        let near_weight = weight(near);
++        let far_weight = weight(near + 1);
++        let combined = near_weight + far_weight;
++        let offset = near as f32 + far_weight / combined;
++        let slot = &mut taps[pair / 2][(pair % 2) * 2..][..2];
++        slot[0] = offset;
++        slot[1] = combined / total;
++    }
++    (1. / total, pair_count as u32)
++}
++
++struct BackdropTexture {
++    texture: ID3D11Texture2D,
++    view: Option<ID3D11ShaderResourceView>,
++    render_target_view: Option<ID3D11RenderTargetView>,
++    width: u32,
++    height: u32,
++}
++
++impl BackdropTexture {
++    fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
++        let desc = D3D11_TEXTURE2D_DESC {
++            Width: width,
++            Height: height,
++            MipLevels: 1,
++            ArraySize: 1,
++            Format: RENDER_TARGET_FORMAT,
++            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
++            Usage: D3D11_USAGE_DEFAULT,
++            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
++            CPUAccessFlags: 0,
++            MiscFlags: 0,
++        };
++        let mut texture = None;
++        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
++        let texture = texture.context("Creating backdrop blur texture")?;
++        let mut view = None;
++        unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view))? };
++        let mut render_target_view = None;
++        unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut render_target_view))? };
++        Ok(Self { texture, view, render_target_view, width, height })
++    }
++}
++
++/// The scratch textures one blur region goes through, sized for a bucketed region of `width` ×
++/// `height`: `source` holds the region as drawn so far, `horizontal` and `blurred` the two
++/// gaussian passes, each `downsample` times smaller along the axes blurred so far.
++struct BackdropTextures {
++    width: u32,
++    height: u32,
++    downsample: u32,
++    source: BackdropTexture,
++    horizontal: BackdropTexture,
++    blurred: BackdropTexture,
++}
++
++impl BackdropTextures {
++    fn new(device: &ID3D11Device, width: u32, height: u32, downsample: u32) -> Result<Self> {
++        let reduced_width = width.div_ceil(downsample);
++        Ok(Self {
++            width,
++            height,
++            downsample,
++            source: BackdropTexture::new(device, width, height)?,
++            horizontal: BackdropTexture::new(device, reduced_width, height)?,
++            blurred: BackdropTexture::new(device, reduced_width, height.div_ceil(downsample))?,
++        })
++    }
++}
++
++struct BackdropBlurPipeline {
++    pass_vertex: ID3D11VertexShader,
++    pass_fragment: ID3D11PixelShader,
++    composite_vertex: ID3D11VertexShader,
++    composite_fragment: ID3D11PixelShader,
++    params_buffer: Option<ID3D11Buffer>,
++    sampler: Option<ID3D11SamplerState>,
++    replace_blend_state: ID3D11BlendState,
++}
++
++impl BackdropBlurPipeline {
++    fn new(device: &ID3D11Device) -> Result<Self> {
++        let shader = |module, target| RawShaderBytes::new(module, target);
++        let pass_vertex = create_vertex_shader(device, shader(ShaderModule::BackdropBlurPass, ShaderTarget::Vertex)?.as_bytes())?;
++        let pass_fragment = create_fragment_shader(device, shader(ShaderModule::BackdropBlurPass, ShaderTarget::Fragment)?.as_bytes())?;
++        let composite_vertex = create_vertex_shader(device, shader(ShaderModule::BackdropBlur, ShaderTarget::Vertex)?.as_bytes())?;
++        let composite_fragment = create_fragment_shader(device, shader(ShaderModule::BackdropBlur, ShaderTarget::Fragment)?.as_bytes())?;
++        // Clamped rather than the sprite sampler's wrap: a tap past the region's edge must
++        // repeat the edge, not the opposite side.
++        let sampler_desc = D3D11_SAMPLER_DESC {
++            Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
++            AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
++            AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
++            AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
++            MipLODBias: 0.0,
++            MaxAnisotropy: 1,
++            ComparisonFunc: D3D11_COMPARISON_ALWAYS,
++            BorderColor: [0.0; 4],
++            MinLOD: 0.0,
++            MaxLOD: D3D11_FLOAT32_MAX,
++        };
++        let mut sampler = None;
++        unsafe { device.CreateSamplerState(&sampler_desc, Some(&mut sampler))? };
++        // Blending off: each pass replaces the pixels it covers.
++        let mut blend = D3D11_BLEND_DESC::default();
++        blend.RenderTarget[0].BlendEnable = false.into();
++        blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
++        let mut replace_blend_state = None;
++        unsafe { device.CreateBlendState(&blend, Some(&mut replace_blend_state))? };
++        Ok(Self {
++            pass_vertex,
++            pass_fragment,
++            composite_vertex,
++            composite_fragment,
++            params_buffer: create_constant_buffer::<BackdropBlurParams>(device)?,
++            sampler,
++            replace_blend_state: replace_blend_state.context("Creating backdrop blur blend state")?,
++        })
++    }
++
++    /// Draws a quad over the top-left `extent` texels of `target`, sampling `source` at t0.
++    fn draw_pass(
++        &self,
++        device_context: &ID3D11DeviceContext,
++        target: &BackdropTexture,
++        extent: (u32, u32),
++        source: &BackdropTexture,
++        params: &BackdropBlurParams,
++    ) -> Result<()> {
++        update_buffer(
++            device_context,
++            self.params_buffer.as_ref().context("backdrop blur params buffer missing")?,
++            slice::from_ref(params),
++        )?;
++        let viewport = D3D11_VIEWPORT {
++            TopLeftX: 0.0,
++            TopLeftY: 0.0,
++            Width: extent.0 as f32,
++            Height: extent.1 as f32,
++            MinDepth: 0.0,
++            MaxDepth: 1.0,
++        };
++        unsafe {
++            // A texture bound for sampling is silently unbound when it becomes a render target,
++            // and the reverse, so the previous pass's source is released first.
++            device_context.PSSetShaderResources(0, Some(&[None]));
++            device_context.OMSetRenderTargets(Some(slice::from_ref(&target.render_target_view)), None);
++            device_context.PSSetShaderResources(0, Some(slice::from_ref(&source.view)));
++            device_context.RSSetViewports(Some(slice::from_ref(&viewport)));
++            device_context.OMSetBlendState(&self.replace_blend_state, None, 0xFFFFFFFF);
++            device_context.Draw(4, 0);
++        }
++        Ok(())
++    }
++}
++
++pub(super) struct BackdropBlurs {
++    /// None when the pipeline couldn't be built: blurs are then skipped, and the window reports
++    /// it so the app can draw its solid stand-ins instead.
++    pipeline: Option<BackdropBlurPipeline>,
++    /// Least recently used first.
++    textures: Vec<BackdropTextures>,
++    idle_frames: u32,
++}
++
++impl BackdropBlurs {
++    pub(super) fn new(device: &ID3D11Device) -> Self {
++        let pipeline = match BackdropBlurPipeline::new(device) {
++            Ok(pipeline) => Some(pipeline),
++            Err(error) => {
++                // No logger may be installed; a console build of the app still shows this.
++                eprintln!("gpui: backdrop blur unavailable on DirectX: {error:#}");
++                log::error!("backdrop blur unavailable on DirectX: {error:#}");
++                None
++            }
++        };
++        Self { pipeline, textures: Vec::new(), idle_frames: 0 }
++    }
++
++    pub(super) fn available(&self) -> bool {
++        self.pipeline.is_some()
++    }
++
++    /// Counts a drawn frame against the scratch textures, releasing them once enough frames
++    /// have gone by without a blur. The pipeline is kept: it holds no window-sized memory.
++    pub(super) fn note_frame(&mut self, frame_had_blurs: bool) {
++        if frame_had_blurs {
++            self.idle_frames = 0;
++            return;
++        }
++        if self.textures.is_empty() {
++            return;
++        }
++        self.idle_frames = self.idle_frames.saturating_add(1);
++        if self.idle_frames >= BACKDROP_BLUR_IDLE_FRAMES {
++            self.textures.clear();
++        }
++    }
++
++    pub(super) fn release_textures(&mut self) {
++        self.textures.clear();
++    }
++
++    /// A scratch set for a `width` × `height` region, created on demand; it becomes the most
++    /// recently used.
++    fn prepare(&mut self, device: &ID3D11Device, width: u32, height: u32, downsample: u32) -> Result<Option<(&BackdropBlurPipeline, &BackdropTextures)>> {
++        if self.pipeline.is_none() {
++            return Ok(None);
++        }
++        let width = width.next_multiple_of(BACKDROP_TEXTURE_GRANULARITY);
++        let height = height.next_multiple_of(BACKDROP_TEXTURE_GRANULARITY);
++        match self.textures.iter().position(|t| t.width == width && t.height == height && t.downsample == downsample) {
++            Some(index) => {
++                let textures = self.textures.remove(index);
++                self.textures.push(textures);
++            }
++            None => {
++                let textures = BackdropTextures::new(device, width, height, downsample)?;
++                if self.textures.len() >= MAX_BACKDROP_TEXTURES {
++                    self.textures.remove(0);
++                }
++                self.textures.push(textures);
++            }
++        }
++        let pipeline = self.pipeline.as_ref().context("backdrop blur pipeline missing")?;
++        let textures = self.textures.last().context("backdrop blur textures missing")?;
++        Ok(Some((pipeline, textures)))
++    }
++}
++
++impl DirectXRenderer {
++    /// Runs `blur` between two batches: copies the region it samples out of the frame, blurs the
++    /// copy, and paints the result back inside the blur's rounded rect, masked by its rounded
++    /// clip and edge fades. A blur that is entirely clipped draws nothing.
++    pub(super) fn draw_backdrop_blur(&mut self, blur: &BackdropBlur) -> Result<()> {
++        let target_bounds = Bounds::new(
++            point(ScaledPixels(0.), ScaledPixels(0.)),
++            size(ScaledPixels(self.width as f32), ScaledPixels(self.height as f32)),
++        );
++        let visible = blur.bounds.intersect(&blur.content_mask.bounds).intersect(&target_bounds);
++        // Written so that NaN bounds are skipped too.
++        if !(visible.size.width.0 > 0. && visible.size.height.0 > 0.) {
++            return Ok(());
++        }
++        // `clamp` passes NaN through, and a NaN sigma would pad the region out to the target.
++        let sigma = if blur.blur_radius.0.is_nan() { 0.5 } else { blur.blur_radius.0.clamp(0.5, MAX_BACKDROP_BLUR_SIGMA) };
++        // Only what lies under the surface is copied, and the blur clamps at the copy's edges.
++        let left = visible.origin.x.0.floor().max(0.) as u32;
++        let top = visible.origin.y.0.floor().max(0.) as u32;
++        let right = visible.right().0.ceil().min(self.width as f32) as u32;
++        let bottom = visible.bottom().0.ceil().min(self.height as f32) as u32;
++        if right <= left || bottom <= top {
++            return Ok(());
++        }
++        let width = right - left;
++        let height = bottom - top;
++        // A wide gaussian has nothing left at the sampling rate of a downsampled texture, so
++        // wide blurs keep every Nth texel and the composite upsamples them bilinearly.
++        let downsample = ((sigma / 8.) as u32).clamp(1, 4);
++        let blurred_width = width.div_ceil(downsample);
++        let blurred_height = height.div_ceil(downsample);
++
++        let devices = self.devices.as_ref().context("devices missing")?;
++        let resources = self.resources.as_ref().context("resources missing")?;
++        let render_target = resources.render_target.as_ref().context("render target missing")?;
++        let Some((pipeline, textures)) = self.backdrop_blurs.prepare(&devices.device, width, height, downsample)? else {
++            return Ok(());
++        };
++        let device_context = &devices.device_context;
++
++        let mut params = BackdropBlurParams {
++            bounds: bounds_to_array(&blur.bounds),
++            corner_radii: [
++                blur.corner_radii.top_left.0,
++                blur.corner_radii.top_right.0,
++                blur.corner_radii.bottom_right.0,
++                blur.corner_radii.bottom_left.0,
++            ],
++            content_mask: bounds_to_array(&blur.content_mask.bounds),
++            region_origin: [left as f32, top as f32],
++            region_size: [width as f32, height as f32],
++            source_size: [0.; 2],
++            source_extent: [0.; 2],
++            direction: [0.; 2],
++            scale: [1.; 2],
++            saturation: blur.saturation,
++            opacity: blur.opacity,
++            center_weight: 1.,
++            tap_pair_count: 0,
++            fades: [blur.fades.top.0, blur.fades.right.0, blur.fades.bottom.0, blur.fades.left.0],
++            rounded_clip: blur.rounded_clip,
++            _pad: [0; 3],
++            taps: [[0.; 4]; BACKDROP_TAP_VECTORS],
++        };
++        let (center_weight, tap_pair_count) = gaussian_tap_pairs(sigma, &mut params.taps);
++
++        let region = D3D11_BOX { left, top, front: 0, right, bottom, back: 1 };
++        unsafe {
++            device_context.OMSetRenderTargets(None, None);
++            device_context.CopySubresourceRegion(&textures.source.texture, 0, 0, 0, 0, render_target, 0, Some(&region));
++            device_context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
++            device_context.VSSetShader(&pipeline.pass_vertex, None);
++            device_context.PSSetShader(&pipeline.pass_fragment, None);
++            device_context.PSSetSamplers(1, Some(slice::from_ref(&pipeline.sampler)));
++            device_context.VSSetConstantBuffers(2, Some(slice::from_ref(&pipeline.params_buffer)));
++            device_context.PSSetConstantBuffers(2, Some(slice::from_ref(&pipeline.params_buffer)));
++        }
++
++        let result = (|| {
++            params.center_weight = center_weight;
++            params.tap_pair_count = tap_pair_count;
++            params.source_size = [textures.source.width as f32, textures.source.height as f32];
++            params.source_extent = [width as f32, height as f32];
++            params.direction = [1., 0.];
++            params.scale = [downsample as f32, 1.];
++            pipeline.draw_pass(device_context, &textures.horizontal, (blurred_width, height), &textures.source, &params)?;
++
++            params.source_size = [textures.horizontal.width as f32, textures.horizontal.height as f32];
++            params.source_extent = [blurred_width as f32, height as f32];
++            params.direction = [0., 1.];
++            params.scale = [1., downsample as f32];
++            pipeline.draw_pass(device_context, &textures.blurred, (blurred_width, blurred_height), &textures.horizontal, &params)?;
++
++            params.source_size = [textures.blurred.width as f32, textures.blurred.height as f32];
++            params.source_extent = [blurred_width as f32, blurred_height as f32];
++            params.scale = [downsample as f32; 2];
++            update_buffer(
++                device_context,
++                pipeline.params_buffer.as_ref().context("backdrop blur params buffer missing")?,
++                slice::from_ref(&params),
++            )?;
++            unsafe {
++                device_context.PSSetShaderResources(0, Some(&[None]));
++                device_context.OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
++                device_context.PSSetShaderResources(0, Some(slice::from_ref(&textures.source.view)));
++                device_context.PSSetShaderResources(4, Some(slice::from_ref(&textures.blurred.view)));
++                device_context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
++                device_context.VSSetShader(&pipeline.composite_vertex, None);
++                device_context.PSSetShader(&pipeline.composite_fragment, None);
++                device_context.OMSetBlendState(&pipeline.replace_blend_state, None, 0xFFFFFFFF);
++                device_context.Draw(4, 0);
++            }
++            anyhow::Ok(())
++        })();
++
++        // Whatever happened, the frame's target is bound again for the batches that follow, and
++        // no scratch texture stays bound: the next blur may render into it.
++        unsafe {
++            device_context.PSSetShaderResources(0, Some(&[None]));
++            device_context.PSSetShaderResources(4, Some(&[None]));
++            device_context.OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
++            device_context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
++        }
++        result
++    }
++}
+diff -ruN a/crates/gpui_windows/src/directx_renderer.rs b/crates/gpui_windows/src/directx_renderer.rs
+--- a/crates/gpui_windows/src/directx_renderer.rs
++++ b/crates/gpui_windows/src/directx_renderer.rs
+@@ -21,8 +21,11 @@
+ 
+ use crate::directx_renderer::shader_resources::{RawShaderBytes, ShaderModule, ShaderTarget};
+ use crate::*;
++use backdrop_blur::BackdropBlurs;
+ use gpui::*;
+ 
++mod backdrop_blur;
++
+ pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
+ const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
+ // This configuration is used for MSAA rendering on paths only, and it's guaranteed to be supported by DirectX 11.
+@@ -54,6 +57,9 @@
+     /// In that case we want to discard the first frame that we draw as we got reset in the middle of a frame
+     /// meaning we lost all the allocated gpu textures and scene resources.
+     skip_draws: bool,
++
++    /// The backdrop blur pipeline and its scratch textures.
++    backdrop_blurs: BackdropBlurs,
+ }
+ 
+ /// Direct3D objects
+@@ -208,6 +214,7 @@
+             .context("Creating DirectX global elements")?;
+         let pipelines = DirectXRenderPipelines::new(&devices.device)
+             .context("Creating DirectX render pipelines")?;
++        let backdrop_blurs = BackdropBlurs::new(&devices.device);
+ 
+         let direct_composition = if disable_direct_composition {
+             None
+@@ -232,6 +239,7 @@
+             width: 1,
+             height: 1,
+             skip_draws: false,
++            backdrop_blurs,
+         })
+     }
+ 
+@@ -360,6 +368,7 @@
+         self.resources = Some(resources);
+         self.globals = globals;
+         self.pipelines = pipelines;
++        self.backdrop_blurs = BackdropBlurs::new(&self.devices.as_ref().context("devices missing")?.device);
+         self.direct_composition = direct_composition;
+         self.skip_draws = true;
+         Ok(())
+@@ -376,9 +385,15 @@
+             return Ok(());
+         }
+         self.render(scene, background_appearance)?;
++        self.backdrop_blurs.note_frame(!scene.backdrop_blurs.is_empty());
+         self.present()
+     }
+ 
++    /// Whether backdrop blurs are drawn: their pipeline was built with the renderer.
++    pub(crate) fn backdrop_blur_available(&self) -> bool {
++        self.backdrop_blurs.available()
++    }
++
+     /// Clear the render target for `background_appearance` and encode every
+     /// primitive batch of `scene` into it, without presenting. Shared by
+     /// [`draw`](Self::draw) (which then presents) and
+@@ -400,7 +415,15 @@
+             .as_ref()
+             .and_then(|devices| devices.annotation.clone())
+             .filter(|annotation| unsafe { annotation.GetStatus().as_bool() });
++        let mut pending_blurs = scene.backdrop_blurs.iter().peekable();
+         for batch in scene.batches() {
++            let batch_order = scene.batch_order(&batch);
++            while let Some(blur) = pending_blurs.next_if(|blur| blur.order <= batch_order) {
++                let _annotation = annotation
++                    .as_ref()
++                    .map(|annotation| Annotation::new(annotation, HSTRING::from("backdrop blur")));
++                self.draw_backdrop_blur(blur).context("drawing a backdrop blur")?;
++            }
+             let _annotation = annotation
+                 .as_ref()
+                 .map(|annotation| Annotation::new(annotation, HSTRING::from(batch.label())));
+@@ -439,6 +462,13 @@
+                 )
+             })?;
+         }
++        // A blur above everything else still frosts what is beneath it.
++        for blur in pending_blurs {
++            let _annotation = annotation
++                .as_ref()
++                .map(|annotation| Annotation::new(annotation, HSTRING::from("backdrop blur")));
++            self.draw_backdrop_blur(blur).context("drawing a backdrop blur")?;
++        }
+         Ok(())
+     }
+ 
+@@ -553,6 +583,7 @@
+                 .context("Failed to resize swap chain")?;
+         }
+ 
++        self.backdrop_blurs.release_textures();
+         resources.recreate_resources(devices, width, height)?;
+ 
+         unsafe {
+@@ -1766,6 +1797,8 @@
+         MonochromeSprite,
+         SubpixelSprite,
+         PolychromeSprite,
++        BackdropBlurPass,
++        BackdropBlur,
+     }
+ 
+     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+@@ -1839,6 +1872,14 @@
+                     ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
+                     ShaderTarget::Fragment => POLYCHROME_SPRITE_FRAGMENT_BYTES,
+                 },
++                ShaderModule::BackdropBlurPass => match target {
++                    ShaderTarget::Vertex => BACKDROP_BLUR_PASS_VERTEX_BYTES,
++                    ShaderTarget::Fragment => BACKDROP_BLUR_PASS_FRAGMENT_BYTES,
++                },
++                ShaderModule::BackdropBlur => match target {
++                    ShaderTarget::Vertex => BACKDROP_BLUR_VERTEX_BYTES,
++                    ShaderTarget::Fragment => BACKDROP_BLUR_FRAGMENT_BYTES,
++                },
+             };
+             Self { inner: bytes }
+         }
+@@ -1921,6 +1962,8 @@
+                 ShaderModule::MonochromeSprite => "monochrome_sprite",
+                 ShaderModule::SubpixelSprite => "subpixel_sprite",
+                 ShaderModule::PolychromeSprite => "polychrome_sprite",
++                ShaderModule::BackdropBlurPass => "backdrop_blur_pass",
++                ShaderModule::BackdropBlur => "backdrop_blur",
+             }
+         }
+     }
+diff -ruN a/crates/gpui_windows/src/shaders.hlsl b/crates/gpui_windows/src/shaders.hlsl
+--- a/crates/gpui_windows/src/shaders.hlsl
++++ b/crates/gpui_windows/src/shaders.hlsl
+@@ -1334,3 +1334,115 @@
+     color.a *= rounded_clip_coverage(underlines[input.underline_id].rounded_clip, input.position.xy);
+     return color;
+ }
++
++/*
++**
++**              Backdrop blurs
++**
++*/
++
++// Ported from Finityno/zed PR #74 (Apache-2.0); per-edge fades and rounded clips added.
++// Mirrors `BackdropBlurParams` in directx_renderer/backdrop_blur.rs.
++cbuffer BackdropBlurParams: register(b2) {
++    Bounds backdrop_bounds;
++    Corners backdrop_corner_radii;
++    Bounds backdrop_content_mask;
++    float2 backdrop_region_origin;
++    float2 backdrop_region_size;
++    float2 backdrop_source_size;
++    float2 backdrop_source_extent;
++    float2 backdrop_direction;
++    float2 backdrop_scale;
++    float backdrop_saturation;
++    float backdrop_opacity;
++    float backdrop_center_weight;
++    uint backdrop_tap_pair_count;
++    // Top, right, bottom, left: how far in from each edge the effect fades out (0: hard).
++    float4 backdrop_fades;
++    uint4 backdrop_clip; // x: the rounded clip, one-based, or 0
++    // xy and zw are each one (offset, weight) pair of folded taps.
++    float4 backdrop_taps[48];
++};
++
++static const uint BACKDROP_MAX_TAP_PAIRS = 96u;
++
++SamplerState s_backdrop: register(s1);
++Texture2D<float4> t_backdrop_blurred: register(t4);
++
++// Scratch textures are bucketed larger than the region copied into them, so a tap past the
++// region's edge repeats its last texel instead of reading stale texels from an earlier blur.
++float4 sample_backdrop(Texture2D<float4> source, float2 texel) {
++    texel = clamp(texel, 0.5, backdrop_source_extent - 0.5);
++    return source.SampleLevel(s_backdrop, texel / backdrop_source_size, 0.);
++}
++
++struct BackdropBlurPassVertexOutput {
++    float4 position: SV_Position;
++};
++
++BackdropBlurPassVertexOutput backdrop_blur_pass_vertex(uint vertex_id: SV_VertexID) {
++    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
++    BackdropBlurPassVertexOutput output;
++    output.position = float4(unit_vertex * float2(2., -2.) + float2(-1., 1.), 0., 1.);
++    return output;
++}
++
++// One axis of the separable gaussian. Every output texel is centred on a source texel (a scale
++// above one keeps every Nth along the axis), which is what lets each pair of neighbouring taps
++// fold exactly into one bilinear sample.
++float4 backdrop_blur_pass_fragment(BackdropBlurPassVertexOutput input): SV_Target {
++    float2 center = floor(input.position.xy) * backdrop_scale + 0.5;
++    float4 sum = sample_backdrop(t_sprite, center) * backdrop_center_weight;
++    uint pair_count = min(backdrop_tap_pair_count, BACKDROP_MAX_TAP_PAIRS);
++    [loop]
++    for (uint pair = 0u; pair < pair_count; pair++) {
++        float4 packed = backdrop_taps[pair >> 1u];
++        float2 tap = (pair & 1u) != 0u ? packed.zw : packed.xy;
++        float2 offset = tap.x * backdrop_direction;
++        sum += (sample_backdrop(t_sprite, center + offset)
++            + sample_backdrop(t_sprite, center - offset)) * tap.y;
++    }
++    return sum;
++}
++
++struct BackdropBlurVertexOutput {
++    float4 position: SV_Position;
++    float4 clip_distance: SV_ClipDistance;
++};
++
++struct BackdropBlurFragmentInput {
++    float4 position: SV_Position;
++};
++
++BackdropBlurVertexOutput backdrop_blur_vertex(uint vertex_id: SV_VertexID) {
++    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
++    BackdropBlurVertexOutput output;
++    output.position = to_device_position(unit_vertex, backdrop_bounds);
++    output.clip_distance = distance_from_clip_rect(unit_vertex, backdrop_bounds, backdrop_content_mask);
++    return output;
++}
++
++// Blending is off for this draw: the fragment replaces the target pixel, so wherever the effect
++// is partial (the anti-aliased rounded edge, a fade, a rounded clip) it mixes with the unblurred
++// copy of that same pixel.
++float4 backdrop_blur_fragment(BackdropBlurFragmentInput input): SV_Target {
++    float2 local = input.position.xy - backdrop_region_origin;
++    int2 texel = int2(clamp(local, 0., backdrop_region_size - 1.));
++    float4 original = t_sprite.Load(int3(texel, 0));
++    float4 frosted = sample_backdrop(t_backdrop_blurred, (local - 0.5) / backdrop_scale + 0.5);
++
++    float luma = dot(frosted.rgb, GRAYSCALE_FACTORS);
++    frosted.rgb = clamp(lerp(float3(luma, luma, luma), frosted.rgb, backdrop_saturation), 0., frosted.a);
++
++    float2 position = input.position.xy;
++    float distance = quad_sdf(position, backdrop_bounds, backdrop_corner_radii);
++    float coverage = saturate(0.5 - distance) * saturate(backdrop_opacity)
++        * rounded_clip_coverage(backdrop_clip.x, position);
++    float2 low = backdrop_bounds.origin;
++    float2 high = backdrop_bounds.origin + backdrop_bounds.size;
++    if (backdrop_fades.x > 0.) { coverage *= saturate((position.y - low.y) / backdrop_fades.x); }
++    if (backdrop_fades.y > 0.) { coverage *= saturate((high.x - position.x) / backdrop_fades.y); }
++    if (backdrop_fades.z > 0.) { coverage *= saturate((high.y - position.y) / backdrop_fades.z); }
++    if (backdrop_fades.w > 0.) { coverage *= saturate((position.x - low.x) / backdrop_fades.w); }
++    return lerp(original, frosted, coverage);
++}
+diff -ruN a/crates/gpui_windows/src/window.rs b/crates/gpui_windows/src/window.rs
+--- a/crates/gpui_windows/src/window.rs
++++ b/crates/gpui_windows/src/window.rs
+@@ -909,6 +909,10 @@
+         true
+     }
+ 
++    fn supports_backdrop_blur(&self) -> bool {
++        self.state.renderer.borrow().backdrop_blur_available()
++    }
++
+     fn set_title(&mut self, title: &str) {
+         unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }
+             .inspect_err(|e| log::error!("Set title failed: {e}"))

@@ -1,0 +1,3 @@
+// The app icon. GPUI on Windows loads icon resource 1 for every window (gpui_windows load_icon),
+// and Explorer shows the first icon group as the .exe icon. app.ico comes from tools/brand_icons.py.
+1 ICON "app.ico"

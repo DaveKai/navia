@@ -1,0 +1,97 @@
+{
+ "data": {
+  "kv": {},
+  "discord_user": {
+   "avatar": "0123456789abcdef0123456789abcdef",
+   "avatar_decoration_data": {
+    "asset": "a_00000000000000000000000000000000",
+    "expires_at": 1797552000,
+    "sku_id": "1000000000000000000"
+   },
+   "bot": false,
+   "collectibles": null,
+   "discriminator": "0",
+   "display_name": "Friend",
+   "display_name_styles": null,
+   "global_name": "Friend",
+   "id": "100000000000000042",
+   "primary_guild": {
+    "badge": "00000000000000000000000000000000",
+    "identity_enabled": true,
+    "identity_guild_id": "1000000000000000001",
+    "tag": "TAG"
+   },
+   "public_flags": 0,
+   "username": "friend.example"
+  },
+  "activities": [
+   {
+    "application_id": "1000000000000000002",
+    "assets": {
+     "large_image": "1000000000000000003"
+    },
+    "buttons": [
+     "Play on GeForce NOW"
+    ],
+    "content_classification": {
+     "data": null,
+     "loaded": true
+    },
+    "created_at": 1794517767100,
+    "details": "Example Game",
+    "id": "0000000000000001",
+    "name": "GeForce NOW",
+    "official_game_id": null,
+    "platform": "desktop",
+    "session_id": "00000000000000000000000000000000",
+    "type": 0
+   },
+   {
+    "assets": {
+     "large_image": "spotify:ab67616d0000b273000000000000000000000000",
+     "large_text": "Example Album"
+    },
+    "content_classification": {
+     "data": null,
+     "loaded": true
+    },
+    "created_at": 1794517761123,
+    "details": "Example Song (feat. Guest Artist)",
+    "flags": 48,
+    "id": "spotify:1",
+    "name": "Spotify",
+    "official_game_id": null,
+    "party": {
+     "id": "spotify:100000000000000042"
+    },
+    "session_id": "00000000000000000000000000000000",
+    "state": "Example Artist; Guest Artist",
+    "sync_id": "0a1b2c3d4e5f6g7h8i9j0k",
+    "timestamps": {
+     "end": 1794517987182,
+     "start": 1794517759182
+    },
+    "type": 2
+   }
+  ],
+  "discord_status": "dnd",
+  "active_on_discord_web": false,
+  "active_on_discord_desktop": true,
+  "active_on_discord_mobile": false,
+  "active_on_discord_embedded": false,
+  "active_on_discord_vr": false,
+  "listening_to_spotify": true,
+  "spotify": {
+   "album": "Example Album",
+   "album_art_url": "https://i.scdn.co/image/ab67616d0000b273000000000000000000000000",
+   "artist": "Example Artist; Guest Artist",
+   "song": "Example Song (feat. Guest Artist)",
+   "timestamps": {
+    "end": 1794517987182,
+    "start": 1794517759182
+   },
+   "track_id": "0a1b2c3d4e5f6g7h8i9j0k"
+  }
+ },
+ "success": true
+}

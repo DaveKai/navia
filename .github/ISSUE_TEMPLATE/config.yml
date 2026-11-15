@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Navidrome server issues
+    url: https://github.com/navidrome/navidrome/issues
+    about: Problems with the server itself go to Navidrome.

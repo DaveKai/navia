@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Installed as /usr/share/metainfo/com.davekai.Navia.metainfo.xml by the packages and the Flatpak. -->
+<component type="desktop-application">
+  <id>com.davekai.Navia</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Navia</name>
+  <summary>Music player for Navidrome</summary>
+  <developer id="com.davekai">
+    <name>DaveKai</name>
+  </developer>
+
+  <description>
+    <p>A native music player for Navidrome.</p>
+    <p>
+      Navia keeps a copy of your library on your computer, so browsing and search stay fast.
+      It plays gapless, can crossfade, and shows synced lyrics.
+      Songs, albums and playlists can be downloaded for listening offline.
+    </p>
+    <p>
+      You can listen along with friends, play to AirPlay 2 speakers and TVs, and show what you
+      play on Discord. When the music ends, Autoplay goes on with songs like the ones you played.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.davekai.Navia.desktop</launchable>
+  <provides>
+    <binary>navia</binary>
+  </provides>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Player</category>
+  </categories>
+  <keywords>
+    <keyword>music</keyword>
+    <keyword>player</keyword>
+    <keyword>navidrome</keyword>
+    <keyword>subsonic</keyword>
+  </keywords>
+
+  <requires>
+    <internet>always</internet>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#5A93F5</color>
+    <color type="primary" scheme_preference="dark">#1F1F1F</color>
+  </branding>
+
+  <content_rating type="oars-1.1"/>
+
+  <!-- The release step adds the homepage and bug tracker links and the screenshots here, once the
+       public repository exists, and a release entry for each version. -->
+
+  <releases>
+    <release version="0.1.0" date="2026-11-15"/>
+  </releases>
+</component>

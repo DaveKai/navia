@@ -1,0 +1,57 @@
+name: Bug report
+description: Something doesn't work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open an album
+        2. Press Play
+        3. …
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS version
+      description: On Linux, also your distribution and desktop.
+      placeholder: Fedora 43, KDE Plasma 6.5
+    validations:
+      required: true
+  - type: input
+    id: navia
+    attributes:
+      label: Navia version
+      description: From Settings › About.
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: Server and version
+      placeholder: Navidrome 0.64.2
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Leave out passwords, tokens and private server addresses.
+      render: text

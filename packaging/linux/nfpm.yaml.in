@@ -1,0 +1,88 @@
+# Rendered by build-release.sh; paths are relative to the stage directory.
+# Dependencies come from the binary: the NEEDED entries, plus libraries it loads at runtime, which
+# ldd can't see (Vulkan and Wayland). The app is Wayland-only. Fontconfig isn't linked.
+name: @APP_NAME@
+arch: @NFPM_ARCH@
+platform: linux
+version: "@VERSION@"
+section: sound
+priority: optional
+maintainer: "@APP_MAINTAINER@"
+description: "@APP_SUMMARY@"
+license: "GPL-3.0-or-later"
+
+contents:
+  - src: ./@APP_NAME@
+    dst: /usr/bin/@APP_NAME@
+    file_info: { mode: 0755 }
+  - src: ./@APP_ID@.desktop
+    dst: /usr/share/applications/@APP_ID@.desktop
+    file_info: { mode: 0644 }
+  # Icons from tools/brand_icons.py. build-release.sh stops if a staged one is missing here.
+  - src: ./icons/hicolor/scalable/apps/@APP_ID@.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/@APP_ID@.svg
+    file_info: { mode: 0644 }
+  - src: ./icons/hicolor/16x16/apps/@APP_ID@.png
+    dst: /usr/share/icons/hicolor/16x16/apps/@APP_ID@.png
+    file_info: { mode: 0644 }
+  - src: ./icons/hicolor/22x22/apps/@APP_ID@.png
+    dst: /usr/share/icons/hicolor/22x22/apps/@APP_ID@.png
+    file_info: { mode: 0644 }
+  - src: ./icons/hicolor/24x24/apps/@APP_ID@.png
+    dst: /usr/share/icons/hicolor/24x24/apps/@APP_ID@.png
+    file_info: { mode: 0644 }
+  - src: ./icons/hicolor/32x32/apps/@APP_ID@.png
+    dst: /usr/share/icons/hicolor/32x32/apps/@APP_ID@.png
+    file_info: { mode: 0644 }
+  - src: ./icons/hicolor/48x48/apps/@APP_ID@.png
+    dst: /usr/share/icons/hicolor/48x48/apps/@APP_ID@.png
+    file_info: { mode: 0644 }
+  - src: ./icons/hicolor/64x64/apps/@APP_ID@.png
+    dst: /usr/share/icons/hicolor/64x64/apps/@APP_ID@.png
+    file_info: { mode: 0644 }
+  - src: ./icons/hicolor/128x128/apps/@APP_ID@.png
+    dst: /usr/share/icons/hicolor/128x128/apps/@APP_ID@.png
+    file_info: { mode: 0644 }
+  - src: ./icons/hicolor/256x256/apps/@APP_ID@.png
+    dst: /usr/share/icons/hicolor/256x256/apps/@APP_ID@.png
+    file_info: { mode: 0644 }
+  - src: ./icons/hicolor/512x512/apps/@APP_ID@.png
+    dst: /usr/share/icons/hicolor/512x512/apps/@APP_ID@.png
+    file_info: { mode: 0644 }
+  - src: ./@APP_ID@.metainfo.xml
+    dst: /usr/share/metainfo/@APP_ID@.metainfo.xml
+    file_info: { mode: 0644 }
+  - src: ./LICENSE
+    dst: /usr/share/doc/@APP_NAME@/LICENSE
+    file_info: { mode: 0644 }
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+      - libgcc-s1
+      # Bare libasound2 is a virtual package on t64 distros, and apt can satisfy it with the OSS shim, which lacks ALSA symbols.
+      - libasound2t64 | libasound2 (>= 1.0.16)
+      - libopus0
+      - libxkbcommon0
+      - libvulkan1
+      - libwayland-client0
+      - libwayland-egl1
+    recommends:
+      - pipewire-alsa | libasound2-plugins
+      - libegl1
+      - mesa-vulkan-drivers
+  rpm:
+    depends:
+      - glibc >= 2.35
+      - libgcc
+      - alsa-lib
+      - opus
+      - libxkbcommon
+      - vulkan-loader
+      - libwayland-client
+      - libwayland-egl
+    recommends:
+      - pipewire-alsa
+      - mesa-libEGL
+      - mesa-vulkan-drivers

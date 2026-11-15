@@ -1,0 +1,436 @@
+diff -ruN a/crates/gpui_windows/build.rs b/crates/gpui_windows/build.rs
+--- a/crates/gpui_windows/build.rs
++++ b/crates/gpui_windows/build.rs
+@@ -1,6 +1,15 @@
+ #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
+ 
+ fn main() {
++    // Built for Windows on another OS there's no fxc.exe, so the shaders are compiled when the
++    // renderer starts, from the embedded source, by the system's d3dcompiler_47.dll (as debug
++    // builds already do).
++    println!("cargo::rustc-check-cfg=cfg(gpui_runtime_shaders)");
++    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
++        && !cfg!(target_os = "windows")
++    {
++        println!("cargo:rustc-cfg=gpui_runtime_shaders");
++    }
+     #[cfg(not(all(target_os = "windows", not(debug_assertions))))]
+     println!("cargo:rerun-if-changed=build.rs");
+     #[cfg(target_os = "windows")]
+diff -ruN a/crates/gpui_windows/src/directx_renderer.rs b/crates/gpui_windows/src/directx_renderer.rs
+--- a/crates/gpui_windows/src/directx_renderer.rs
++++ b/crates/gpui_windows/src/directx_renderer.rs
+@@ -92,6 +92,44 @@
+     mono_sprites: PipelineState<MonochromeSprite>,
+     subpixel_sprites: PipelineState<SubpixelSprite>,
+     poly_sprites: PipelineState<PolychromeSprite>,
++    rounded_clips: RoundedClipBuffer,
++}
++
++/// `Scene::rounded_clips`, which every pixel shader reads at t2 (`rounded_clip_coverage`).
++struct RoundedClipBuffer {
++    buffer: ID3D11Buffer,
++    view: Option<ID3D11ShaderResourceView>,
++    capacity: usize,
++}
++
++impl RoundedClipBuffer {
++    fn new(device: &ID3D11Device) -> Result<Self> {
++        let capacity = 64;
++        let buffer = create_buffer(device, std::mem::size_of::<RoundedClipNode>(), capacity)?;
++        let view = create_buffer_view(device, &buffer)?;
++        Ok(Self { buffer, view, capacity })
++    }
++
++    fn upload(
++        &mut self,
++        device: &ID3D11Device,
++        device_context: &ID3D11DeviceContext,
++        clips: &[RoundedClipNode],
++    ) -> Result<()> {
++        if clips.is_empty() {
++            return Ok(());
++        }
++        if self.capacity < clips.len() {
++            let capacity = clips.len().next_power_of_two();
++            let buffer = create_buffer(device, std::mem::size_of::<RoundedClipNode>(), capacity)?;
++            self.view = create_buffer_view(device, &buffer)?;
++            self.buffer = buffer;
++            self.capacity = capacity;
++        }
++        update_buffer(device_context, &self.buffer, clips)?;
++        unsafe { device_context.PSSetShaderResources(2, Some(slice::from_ref(&self.view))) };
++        Ok(())
++    }
+ }
+ 
+ struct DirectXGlobalElements {
+@@ -529,6 +567,12 @@
+     fn upload_scene_buffers(&mut self, scene: &Scene) -> Result<()> {
+         let devices = self.devices.as_ref().context("devices missing")?;
+ 
++        self.pipelines.rounded_clips.upload(
++            &devices.device,
++            &devices.device_context,
++            &scene.rounded_clips,
++        )?;
++
+         if !scene.shadows.is_empty() {
+             self.pipelines.shadow_pipeline.update_buffer(
+                 &devices.device,
+@@ -641,6 +685,7 @@
+                 st_position: v.st_position,
+                 color: path.color,
+                 bounds: path.clipped_bounds(),
++                rounded_clip: path.rounded_clip,
+             }));
+         }
+ 
+@@ -1007,6 +1052,7 @@
+             mono_sprites,
+             subpixel_sprites,
+             poly_sprites,
++            rounded_clips: RoundedClipBuffer::new(device)?,
+         })
+     }
+ }
+@@ -1273,6 +1319,7 @@
+     st_position: Point<f32>,
+     color: Background,
+     bounds: Bounds<ScaledPixels>,
++    rounded_clip: u32,
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -1697,15 +1744,18 @@
+ pub(crate) mod shader_resources {
+     use anyhow::Result;
+ 
+-    #[cfg(debug_assertions)]
++    #[cfg(any(debug_assertions, gpui_runtime_shaders))]
+     use windows::{
+         Win32::Graphics::Direct3D::{
+-            Fxc::{D3DCOMPILE_DEBUG, D3DCOMPILE_SKIP_OPTIMIZATION, D3DCompileFromFile},
++            Fxc::D3DCompile,
+             ID3DBlob,
+         },
+-        core::{HSTRING, PCSTR},
++        core::PCSTR,
+     };
+ 
++    #[cfg(any(debug_assertions, gpui_runtime_shaders))]
++    const SHADER_SOURCE: &str = include_str!("shaders.hlsl");
++
+     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+     pub(crate) enum ShaderModule {
+         Quad,
+@@ -1727,17 +1777,17 @@
+     pub(crate) struct RawShaderBytes<'t> {
+         inner: &'t [u8],
+ 
+-        #[cfg(debug_assertions)]
++        #[cfg(any(debug_assertions, gpui_runtime_shaders))]
+         _blob: ID3DBlob,
+     }
+ 
+     impl<'t> RawShaderBytes<'t> {
+         pub(crate) fn new(module: ShaderModule, target: ShaderTarget) -> Result<Self> {
+-            #[cfg(not(debug_assertions))]
++            #[cfg(not(any(debug_assertions, gpui_runtime_shaders)))]
+             {
+                 Ok(Self::from_bytes(module, target))
+             }
+-            #[cfg(debug_assertions)]
++            #[cfg(any(debug_assertions, gpui_runtime_shaders))]
+             {
+                 let blob = build_shader_blob(module, target)?;
+                 let inner = unsafe {
+@@ -1754,7 +1804,7 @@
+             self.inner
+         }
+ 
+-        #[cfg(not(debug_assertions))]
++        #[cfg(not(any(debug_assertions, gpui_runtime_shaders)))]
+         fn from_bytes(module: ShaderModule, target: ShaderTarget) -> Self {
+             let bytes = match module {
+                 ShaderModule::Quad => match target {
+@@ -1794,13 +1844,9 @@
+         }
+     }
+ 
+-    #[cfg(debug_assertions)]
++    #[cfg(any(debug_assertions, gpui_runtime_shaders))]
+     pub(super) fn build_shader_blob(entry: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
+         unsafe {
+-            use windows::Win32::Graphics::{
+-                Direct3D::ID3DInclude, Hlsl::D3D_COMPILE_STANDARD_FILE_INCLUDE,
+-            };
+-
+             let entry = format!(
+                 "{}_{}\0",
+                 entry.as_str(),
+@@ -1816,25 +1862,31 @@
+ 
+             let mut compile_blob = None;
+             let mut error_blob = None;
+-            let shader_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+-                .join("src/shaders.hlsl")
+-                .canonicalize()?;
++            // The source is embedded, with its one include inlined, so a build made on another OS
++            // (no fxc.exe there, see build.rs) or run on another machine compiles the same file,
++            // with the system's d3dcompiler_47.dll.
++            let source = SHADER_SOURCE.replace(
++                "#include \"alpha_correction.hlsl\"",
++                include_str!("alpha_correction.hlsl"),
++            );
++            #[cfg(debug_assertions)]
++            let flags = windows::Win32::Graphics::Direct3D::Fxc::D3DCOMPILE_DEBUG
++                | windows::Win32::Graphics::Direct3D::Fxc::D3DCOMPILE_SKIP_OPTIMIZATION;
++            #[cfg(not(debug_assertions))]
++            let flags = windows::Win32::Graphics::Direct3D::Fxc::D3DCOMPILE_OPTIMIZATION_LEVEL3;
+ 
+             let entry_point = PCSTR::from_raw(entry.as_ptr());
+             let target_cstr = PCSTR::from_raw(target.as_ptr());
+ 
+-            // really dirty trick because winapi bindings are unhappy otherwise
+-            let include_handler = &std::mem::transmute::<usize, ID3DInclude>(
+-                D3D_COMPILE_STANDARD_FILE_INCLUDE as usize,
+-            );
+-
+-            let ret = D3DCompileFromFile(
+-                &HSTRING::from(shader_path.to_str().unwrap()),
++            let ret = D3DCompile(
++                source.as_ptr() as *const std::ffi::c_void,
++                source.len(),
++                PCSTR::from_raw(b"shaders.hlsl\0".as_ptr()),
++                None,
+                 None,
+-                include_handler,
+                 entry_point,
+                 target_cstr,
+-                D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION,
++                flags,
+                 0,
+                 &mut compile_blob,
+                 Some(&mut error_blob),
+@@ -1854,10 +1906,10 @@
+         }
+     }
+ 
+-    #[cfg(not(debug_assertions))]
++    #[cfg(not(any(debug_assertions, gpui_runtime_shaders)))]
+     include!(concat!(env!("OUT_DIR"), "/shaders_bytes.rs"));
+ 
+-    #[cfg(debug_assertions)]
++    #[cfg(any(debug_assertions, gpui_runtime_shaders))]
+     impl ShaderModule {
+         pub fn as_str(self) -> &'static str {
+             match self {
+diff -ruN a/crates/gpui_windows/src/shaders.hlsl b/crates/gpui_windows/src/shaders.hlsl
+--- a/crates/gpui_windows/src/shaders.hlsl
++++ b/crates/gpui_windows/src/shaders.hlsl
+@@ -314,6 +314,31 @@
+     return quad_sdf_impl(corner_center_to_point, corner_radius);
+ }
+ 
++// Rounded clips (gpui Scene::rounded_clips): a primitive's `rounded_clip` is a one-based index
++// into this buffer, 0 for none. Each clip names its parent the same way, so nested clips
++// intersect. Parents are always pushed before their children.
++struct RoundedClip {
++    Bounds bounds;
++    Corners corner_radii;
++    uint parent;
++    uint3 pad;
++};
++
++StructuredBuffer<RoundedClip> rounded_clips: register(t2);
++
++// How much of the pixel at `position` is inside clip `first` and every clip around it.
++float rounded_clip_coverage(uint first, float2 position) {
++    uint index = first;
++    float coverage = 1.0;
++    [loop]
++    for (uint depth = 0u; depth < 64u && index != 0u; depth++) {
++        RoundedClip clip = rounded_clips[index - 1u];
++        coverage = min(coverage, saturate(0.5 - quad_sdf(position, clip.bounds, clip.corner_radii)));
++        index = clip.parent;
++    }
++    return coverage;
++}
++
+ GradientColor prepare_gradient_color(uint tag, uint color_space, Hsla solid, LinearColorStop colors[2]) {
+     GradientColor output;
+     if (tag == 0 || tag == 2 || tag == 3) {
+@@ -507,7 +532,6 @@
+     Hsla border_color;
+     Corners corner_radii;
+     Edges border_widths;
+-    // Rounded clips (scene.rs): not applied on DirectX yet; here so the stride matches.
+     uint rounded_clip;
+     uint clip_pad0;
+     uint clip_pad1;
+@@ -561,7 +585,7 @@
+     return output;
+ }
+ 
+-float4 quad_fragment(QuadFragmentInput input): SV_Target {
++float4 quad_fragment_unclipped(QuadFragmentInput input) {
+     Quad quad = quads[input.quad_id];
+     float4 background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
+     input.background_solid, input.background_color0, input.background_color1);
+@@ -868,7 +892,7 @@
+     Bounds element_bounds;
+     Corners element_corner_radii;
+     uint inset;
+-    uint pad; // align to 8 bytes
++    uint rounded_clip;
+ };
+ 
+ struct ShadowVertexOutput {
+@@ -915,7 +939,7 @@
+     return output;
+ }
+ 
+-float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
++float4 shadow_fragment_unclipped(ShadowFragmentInput input) {
+     Shadow shadow = shadows[input.shadow_id];
+ 
+     float2 half_size = shadow.bounds.size / 2.;
+@@ -969,6 +993,7 @@
+     float2 st_position;
+     Background color;
+     Bounds bounds;
++    uint rounded_clip;
+ };
+ 
+ StructuredBuffer<PathRasterizationSprite> path_rasterization_sprites: register(t1);
+@@ -998,7 +1023,7 @@
+     return output;
+ }
+ 
+-float4 path_rasterization_fragment(PathFragmentInput input): SV_Target {
++float4 path_rasterization_fragment_unclipped(PathFragmentInput input) {
+     float2 dx = ddx(input.st_position);
+     float2 dy = ddy(input.st_position);
+     PathRasterizationSprite sprite = path_rasterization_sprites[input.vertex_id];
+@@ -1069,7 +1094,7 @@
+ 
+ struct Underline {
+     uint order;
+-    uint pad;
++    uint rounded_clip;
+     Bounds bounds;
+     Bounds content_mask;
+     Hsla color;
+@@ -1109,7 +1134,7 @@
+     return output;
+ }
+ 
+-float4 underline_fragment(UnderlineFragmentInput input): SV_Target {
++float4 underline_fragment_unclipped(UnderlineFragmentInput input) {
+     const float WAVE_FREQUENCY = 2.0;
+     const float WAVE_HEIGHT_RATIO = 0.8;
+ 
+@@ -1144,7 +1169,7 @@
+ 
+ struct MonochromeSprite {
+     uint order;
+-    uint pad;
++    uint rounded_clip;
+     AtlasTile tile;
+     Bounds bounds;
+     Bounds content_mask;
+@@ -1157,6 +1182,7 @@
+     float2 tile_position: POSITION;
+     nointerpolation float4 color: COLOR;
+     float4 clip_distance: SV_ClipDistance;
++    nointerpolation uint rounded_clip: TEXCOORD5;
+ };
+ 
+ struct MonochromeSpriteFragmentInput {
+@@ -1164,6 +1190,7 @@
+     float2 tile_position: POSITION;
+     nointerpolation float4 color: COLOR;
+     float4 clip_distance: SV_ClipDistance;
++    nointerpolation uint rounded_clip: TEXCOORD5;
+ };
+ 
+ StructuredBuffer<MonochromeSprite> mono_sprites: register(t1);
+@@ -1183,13 +1210,15 @@
+     output.tile_position = tile_position;
+     output.color = color;
+     output.clip_distance = clip_distance;
++    output.rounded_clip = sprite.rounded_clip;
+     return output;
+ }
+ 
+ float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
+     float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
+     float alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
+-    return float4(input.color.rgb, input.color.a * alpha_corrected);
++    float coverage = rounded_clip_coverage(input.rounded_clip, input.position.xy);
++    return float4(input.color.rgb, input.color.a * alpha_corrected * coverage);
+ }
+ 
+ MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+@@ -1204,8 +1233,9 @@
+     float3 alpha_corrected = apply_contrast_and_gamma_correction3(sample, input.color.rgb, subpixel_enhanced_contrast, gamma_ratios);
+ 
+     SubpixelSpriteFragmentOutput output;
++    float coverage = rounded_clip_coverage(input.rounded_clip, input.position.xy);
+     output.foreground = float4(input.color.rgb, 1.0f);
+-    output.alpha = float4(input.color.a * alpha_corrected, 1.0f);
++    output.alpha = float4(input.color.a * alpha_corrected * coverage, 1.0f);
+     return output;
+ }
+ 
+@@ -1217,7 +1247,7 @@
+ 
+ struct PolychromeSprite {
+     uint order;
+-    uint pad;
++    uint rounded_clip;
+     AtlasTile tile;
+     uint grayscale;
+     float opacity;
+@@ -1268,6 +1298,39 @@
+         float3 grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
+         color = float4(grayscale, sample.a);
+     }
+-    color.a *= sprite.opacity * saturate(0.5 - distance);
++    color.a *= sprite.opacity * saturate(0.5 - distance)
++        * rounded_clip_coverage(sprite.rounded_clip, input.position.xy);
++    return color;
++}
++
++/*
++**
++**              Rounded clip wrappers
++**
++*/
++
++// Each entry point runs the unclipped shader above and applies the primitive's rounded clip.
++
++float4 quad_fragment(QuadFragmentInput input): SV_Target {
++    float4 color = quad_fragment_unclipped(input);
++    color.a *= rounded_clip_coverage(quads[input.quad_id].rounded_clip, input.position.xy);
++    return color;
++}
++
++float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
++    float4 color = shadow_fragment_unclipped(input);
++    color.a *= rounded_clip_coverage(shadows[input.shadow_id].rounded_clip, input.position.xy);
++    return color;
++}
++
++// Paths are drawn premultiplied, so the whole color takes the clip.
++float4 path_rasterization_fragment(PathFragmentInput input): SV_Target {
++    return path_rasterization_fragment_unclipped(input)
++        * rounded_clip_coverage(path_rasterization_sprites[input.vertex_id].rounded_clip, input.position.xy);
++}
++
++float4 underline_fragment(UnderlineFragmentInput input): SV_Target {
++    float4 color = underline_fragment_unclipped(input);
++    color.a *= rounded_clip_coverage(underlines[input.underline_id].rounded_clip, input.position.xy);
+     return color;
+ }

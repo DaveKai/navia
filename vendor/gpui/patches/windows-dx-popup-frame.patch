@@ -1,0 +1,15 @@
+diff -ruN a/crates/gpui_windows/src/window.rs b/crates/gpui_windows/src/window.rs
+--- a/crates/gpui_windows/src/window.rs
++++ b/crates/gpui_windows/src/window.rs
+@@ -492,7 +492,10 @@
+         );
+ 
+         let (mut dwexstyle, dwstyle) = if params.kind == WindowKind::PopUp {
+-            (WS_EX_TOOLWINDOW | WS_EX_TOPMOST, WINDOW_STYLE(0x0))
++            // A resizable pop-up gets the system's sizing frame, which a hidden title bar keeps
++            // invisible outside the window: resizing from its edges, and with it DWM's shadow.
++            let style = if params.is_resizable { WS_THICKFRAME } else { WINDOW_STYLE(0x0) };
++            (WS_EX_TOOLWINDOW | WS_EX_TOPMOST, style)
+         } else {
+             let mut dwstyle = WS_SYSMENU;
+ 

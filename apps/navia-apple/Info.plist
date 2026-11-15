@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Keys Xcode doesn't generate from build settings; the rest of the app's Info.plist is generated. -->
+<plist version="1.0">
+<dict>
+	<!-- The build's short commit for Settings > About, set by scripts/mac.sh (tools/version.sh); empty for a release. -->
+	<key>NaviaCommit</key>
+	<string>$(NAVIA_COMMIT)</string>
+	<!-- Finder's Get Info and the standard About panel. -->
+	<key>NSHumanReadableCopyright</key>
+	<string>Licensed under GPL-3.0-or-later</string>
+	<!-- mDNS services the AirPlay output browses (receivers) and announces (their remote buttons, DACP);
+	     macOS's Local Network privacy lets an app use only the types listed here. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_airplay._tcp</string>
+		<string>_dacp._tcp</string>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.davekai.Navia.songs</string>
+			<key>UTTypeDescription</key>
+			<string>Navia songs</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

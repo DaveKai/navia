@@ -1,0 +1,75 @@
+diff -ruN a/crates/gpui_windows/src/events.rs b/crates/gpui_windows/src/events.rs
+--- a/crates/gpui_windows/src/events.rs
++++ b/crates/gpui_windows/src/events.rs
+@@ -109,7 +109,7 @@
+             WM_CLOSE => self.handle_close_msg(),
+             WM_DESTROY => self.handle_destroy_msg(handle),
+             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
+-            WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(),
++            WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(handle),
+             WM_NCMOUSEMOVE => self.handle_nc_mouse_move_msg(handle, lparam),
+             // Treat double click as a second single click, since we track the double clicks ourselves.
+             // If you don't interact with any elements, this will fall through to the windows default
+@@ -392,8 +392,23 @@
+         if handled { Some(0) } else { Some(1) }
+     }
+ 
+-    fn handle_mouse_leave_msg(&self) -> Option<isize> {
++    fn handle_mouse_leave_msg(&self, handle: HWND) -> Option<isize> {
+         self.state.hovered.set(false);
++        // Crossing between the client area and a caption control drawn in it ends one area's
++        // tracking while the pointer is still over this window: hover follows the pointer to
++        // where it is now, and the next move arms tracking for that area.
++        let mut cursor = POINT::default();
++        let over_window = unsafe { GetCursorPos(&mut cursor).is_ok() && WindowFromPoint(cursor) == handle };
++        if std::env::var_os("GPUI_NC_LOG").is_some() {
++            eprintln!("gpui: mouse leave, still over the window: {over_window}");
++        }
++        if over_window {
++            unsafe { ScreenToClient(handle, &mut cursor).ok().log_err() };
++            self.dispatch_hover_move(cursor.x as f32, cursor.y as f32);
++            return Some(0);
++        }
++        // Gone from the window: nothing stays hovered.
++        self.dispatch_hover_move(-1.0e6, -1.0e6);
+         // The next window's `WM_SETCURSOR` picks its own cursor, so we just clear
+         // the flag for tight `is_cursor_visible()` semantics.
+         self.state.cursor_visible.store(true, Ordering::Relaxed);
+@@ -1037,8 +1052,37 @@
+         drag_area
+     }
+ 
++    /// A pointer move with no button held, in client pixels, for hover only.
++    fn dispatch_hover_move(&self, x: f32, y: f32) {
++        let Some(mut func) = self.state.callbacks.input.take() else { return };
++        let scale_factor = self.state.scale_factor.get();
++        let input = PlatformInput::MouseMove(MouseMoveEvent {
++            position: logical_point(x, y, scale_factor),
++            pressed_button: None,
++            modifiers: current_modifiers(),
++        });
++        func(input);
++        self.state.callbacks.input.set(Some(func));
++    }
++
+     fn handle_nc_mouse_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
++        // Over the app's own caption controls (HTCLOSE, HTMAXBUTTON...) every move arrives here.
++        // Leave tracking is re-armed for the non-client area on each one: the client area's
++        // tracking may still be the one armed when the pointer crossed onto a control, and then
++        // leaving the window from the control would never be reported.
++        unsafe {
++            TrackMouseEvent(&mut TRACKMOUSEEVENT {
++                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
++                dwFlags: TME_LEAVE | TME_NONCLIENT,
++                hwndTrack: handle,
++                dwHoverTime: HOVER_DEFAULT,
++            })
++            .log_err()
++        };
+         self.start_tracking_mouse(handle, TME_LEAVE | TME_NONCLIENT);
++        if std::env::var_os("GPUI_NC_LOG").is_some() {
++            eprintln!("gpui: nc mouse move at {},{}", lparam.signed_loword(), lparam.signed_hiword());
++        }
+         self.restore_cursor_after_hide();
+ 
+         let mut func = self.state.callbacks.input.take()?;
