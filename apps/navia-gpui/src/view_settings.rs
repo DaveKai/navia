@@ -13,8 +13,8 @@ use navia_core::reporting::PlayThreshold;
 use crate::color::{hex_to_hue, hue_to_hex, is_hex, parse_hex};
 use crate::eq_model::OUTPUT_DEFAULT;
 
-/// The GPL text Settings > About links to.
-pub const LICENSE_URL: &str = "https://www.gnu.org/licenses/gpl-3.0.html";
+/// Navia's license file in its repository, for Settings > About.
+pub const LICENSE_URL: &str = "https://github.com/DaveKai/navia/blob/main/LICENSE";
 
 /// The output pickers in Settings and the Equalizer, refreshed when devices change.
 pub const OUTPUT_SELECT: &str = "output-device";
@@ -672,23 +672,20 @@ impl Shell {
         self.settings_frame(layout, col)
     }
 
-    /// Settings > About. Shows the version, plus update checks on Windows. Linux updates through its package manager.
+    /// Settings > About: the version, Check for Updates and "Check for updates automatically".
     fn render_settings_about(&mut self, layout: &Layout, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        use crate::updates::{HAS_UPDATER, UpdateStatus};
+        use crate::updates::UpdateStatus;
         let t = self.theme;
         let main_tokens = f32::from(layout.main_width) / t.token_scale();
         let version = div().flex_none().text_size(t.text(TEXT_SM)).text_color(t.t2()).child(crate::updates::version_label()).into_any_element();
         let mut col = div().flex().flex_col().child(section_title(&t, tr("About")));
-        // Navia's license, with the text on gnu.org.
         let license_button = settings_button(&t, "view-license", tr("View License"), true).stop(&t).on_click(|_, _, cx| cx.open_url(LICENSE_URL)).into_any_element();
         let license = settings_row(&t, tr("License"), Some(tr("Licensed under GPL-3.0-or-later.").into()), license_button, RowPos::Last, main_tokens);
-        if !HAS_UPDATER {
-            return self.settings_frame(layout, col.child(settings_row(&t, tr("Version"), None, version, RowPos::First, main_tokens)).child(license));
-        }
         let status = self.update_status.clone();
-        let label = match status {
+        let label = match &status {
             UpdateStatus::Checking => tr("Checking…"),
             UpdateStatus::Ready => tr("Restart to update"),
+            UpdateStatus::Available { .. } => tr("Download"),
             _ => tr("Check for Updates"),
         };
         let checking = status == UpdateStatus::Checking;

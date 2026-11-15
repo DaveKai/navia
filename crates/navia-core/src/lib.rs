@@ -34,5 +34,6 @@ pub mod artist_filters;
 pub mod song_filters;
 pub mod songcache;
 pub mod stations;
+pub mod updates;
 
 pub use error::{Error, Result};

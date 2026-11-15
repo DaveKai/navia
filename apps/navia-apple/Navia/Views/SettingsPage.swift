@@ -1,6 +1,8 @@
 import SwiftUI
 import NaviaCoreFFI
 
+private let licenseURL = URL(string: "https://github.com/DaveKai/navia/blob/main/LICENSE")!
+
 /// Every Settings section. Rows the Mac can't back yet are disabled and say why.
 struct SettingsPage: View {
     let shell: ShellModel
@@ -266,16 +268,14 @@ struct SettingsPage: View {
             SettingsRow(label: L("Version"), hint: updates.note) {
                 HStack(spacing: T.px(10)) {
                     Text(AppUpdates.versionLabel).font(.navia(T.textSM)).foregroundStyle(T.t2.color)
-                    ActionButton(title: updates.status == .checking ? L("Checking…") : updates.status == .ready ? L("Restart to update") : L("Check for Updates"),
-                                 compact: true, enabled: updates.status != .checking) { updates.check() }
+                    ActionButton(title: updates.buttonTitle, compact: true, enabled: updates.status != .checking) { updates.check() }
                 }
             }
             SettingsRow(label: L("Check for updates automatically"), hint: nil) {
                 ToggleSwitch(isOn: Binding(get: { updates.checkAutomatically }, set: { updates.checkAutomatically = $0 }), accent: theme.accent, label: L("Check for updates automatically"))
             }
-            // Navia's license, with the text on gnu.org.
             SettingsRow(label: L("License"), hint: L("Licensed under GPL-3.0-or-later."), last: true) {
-                ActionButton(title: L("View License"), compact: true) { NSWorkspace.shared.open(URL(string: "https://www.gnu.org/licenses/gpl-3.0.html")!) }
+                ActionButton(title: L("View License"), compact: true) { NSWorkspace.shared.open(licenseURL) }
             }
         }
     }

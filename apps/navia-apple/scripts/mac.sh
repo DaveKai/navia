@@ -15,8 +15,8 @@ sync() {
   rsync -a --delete --exclude 'target/' --exclude 'node_modules/' --exclude '.env*' --exclude '.git/' --exclude 'apps/navia-apple/.build/' --exclude '.DS_Store' "$ROOT/" "$REMOTE:$REMOTE_DIR/"
 }
 
-# The version from the workspace Cargo.toml, stamped into Info.plist with the build number and commit.
-STAMP="MARKETING_VERSION=$("$ROOT/tools/version.sh") CURRENT_PROJECT_VERSION=$("$ROOT/tools/version.sh" build) NAVIA_COMMIT=$("$ROOT/tools/version.sh" commit)${NAVIA_DEVELOPMENT_TEAM:+ DEVELOPMENT_TEAM=$NAVIA_DEVELOPMENT_TEAM}"
+# The version, build number and commit, stamped into Info.plist.
+STAMP="$("$ROOT/tools/version.sh" xcode)${NAVIA_DEVELOPMENT_TEAM:+ DEVELOPMENT_TEAM=$NAVIA_DEVELOPMENT_TEAM}"
 
 case "${1:-}" in
   sync) sync ;;

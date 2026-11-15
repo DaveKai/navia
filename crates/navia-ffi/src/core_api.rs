@@ -214,6 +214,35 @@ pub fn set_app_version(version: String) {
     navia_core::client::set_app_version(&version);
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ReleaseCheckRow {
+    UpToDate,
+    Available { version: String, url: String },
+    Failed,
+}
+
+/// Asks GitHub whether a release newer than `running_version` is out. Blocks, so call it off the main thread.
+#[uniffi::export]
+pub fn check_latest_release(running_version: String) -> ReleaseCheckRow {
+    use navia_core::updates::ReleaseCheck;
+    match navia_core::updates::check_latest_release(&running_version) {
+        Ok(ReleaseCheck::UpToDate) => ReleaseCheckRow::UpToDate,
+        Ok(ReleaseCheck::Available { version, url }) => ReleaseCheckRow::Available { version, url },
+        Err(error) => {
+            tracing::warn!("update check failed: {error}");
+            ReleaseCheckRow::Failed
+        }
+    }
+}
+
+/// Whether the automatic update check should run now. `last_checked` is in Unix seconds.
+#[uniffi::export]
+pub fn automatic_update_check_due(test_run: bool, last_checked: Option<u64>) -> bool {
+    use navia_core::updates::{automatic_check_allowed, automatic_check_due};
+    let last = last_checked.map(|secs| std::time::UNIX_EPOCH + Duration::from_secs(secs));
+    automatic_check_allowed(test_run) && automatic_check_due(last, std::time::SystemTime::now())
+}
+
 /// A client's display name. Navia's own is always "Navia".
 #[uniffi::export]
 pub fn client_display_name(name: String) -> String {
