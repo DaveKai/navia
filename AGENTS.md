@@ -6,6 +6,7 @@
   - `apps/navia-apple/Navia/Resources/Locales/`: `python3 -I tools/i18n.py sync`
   - the Swift bindings: `apps/navia-apple/scripts/build-core.sh`
 - Change GPUI only through a patch in `vendor/gpui/patches/`. `vendor/gpui/zed` and `wgpu` are downloaded.
+- No useless comments. Comment only what the code can't say on its own (why, a unit, a platform quirk), in one short plain line. Never restate the code or narrate its history.
 - Commit messages use Conventional Commits with a scope: see CONTRIBUTING.md, "Pull requests".
 
 ## Commands
