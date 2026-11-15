@@ -17,11 +17,7 @@ import Observation
         didSet { UserDefaults.standard.set(checkAutomatically, forKey: "checkUpdates") }
     }
 
-    /// When the last check got an answer, in Unix seconds.
-    private var checkedAt: UInt64? {
-        get { (UserDefaults.standard.object(forKey: "updateCheckedAt") as? NSNumber)?.uint64Value }
-        set { UserDefaults.standard.set(newValue.map { NSNumber(value: $0) }, forKey: "updateCheckedAt") }
-    }
+    private var automaticChecks: Task<Void, Never>?
 
     private init() {
         checkAutomatically = UserDefaults.standard.object(forKey: "checkUpdates") as? Bool ?? true
@@ -74,13 +70,19 @@ import Observation
         }
     }
 
-    /// At most once a day, and never in test runs, sample mode or the developer override.
-    func checkAtLaunch() {
-        guard checkAutomatically, automaticUpdateCheckDue(testRun: CoreMode.isTestRun || CoreMode.useSample, lastChecked: checkedAt) else { return }
-        run(automatic: true)
+    /// At launch and then every few hours, never in test runs, sample mode or the developer override.
+    func startAutomaticChecks() {
+        guard automaticChecks == nil, automaticUpdateCheckAllowed(testRun: CoreMode.isTestRun || CoreMode.useSample) else { return }
+        let interval = Duration.seconds(Int64(updateCheckIntervalSecs()))
+        automaticChecks = Task {
+            while !Task.isCancelled {
+                if checkAutomatically, status != .checking { run(automatic: true) }
+                try? await Task.sleep(for: interval)
+            }
+        }
     }
 
-    /// An automatic check stays quiet unless it finds a newer release.
+    /// An automatic check stays quiet unless it finds a newer release than the one shown.
     private func run(automatic: Bool) {
         if !automatic { status = .checking }
         let running = Self.versionForAgent
@@ -97,8 +99,10 @@ import Observation
         case .available(let version, let url): next = .available(version: version, url: url)
         case .failed: next = .failed
         }
-        if next != .failed { checkedAt = UInt64(Date().timeIntervalSince1970) }
-        if case .available = next, automatic, status == .idle { status = next }
-        if !automatic { status = next }
+        if !automatic {
+            status = next
+        } else if case .available = next, status != next, status != .checking {
+            status = next
+        }
     }
 }

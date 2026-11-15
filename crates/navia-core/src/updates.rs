@@ -1,7 +1,7 @@
 //! Whether a newer Navia is out, from the repository's latest GitHub release. For builds without
 //! an updater of their own: the Mac until it has Developer ID signing, and Linux. Windows uses Velopack.
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use semver::Version;
 use serde::Deserialize;
@@ -11,8 +11,8 @@ use crate::{Error, Result};
 pub const LATEST_RELEASE_API: &str = "https://api.github.com/repos/DaveKai/navia/releases/latest";
 /// Opened when a release's own page link is missing or not https.
 pub const RELEASES_PAGE: &str = "https://github.com/DaveKai/navia/releases/latest";
-/// The automatic check runs at most this often.
-pub const AUTOMATIC_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// The automatic check runs at launch and then this often.
+pub const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Forces the automatic check in runs that otherwise skip it (`NAVIA_CHECK_UPDATES=1`).
 pub const FORCE_ENV: &str = "NAVIA_CHECK_UPDATES";
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -68,15 +68,6 @@ pub fn check_release_at(api: &str, running: &str) -> Result<ReleaseCheck> {
     compare(&response.text()?, running)
 }
 
-/// Whether the automatic check is due: never checked, or `AUTOMATIC_INTERVAL` since the last one
-/// (a clock set back counts as due).
-pub fn automatic_check_due(last: Option<SystemTime>, now: SystemTime) -> bool {
-    match last {
-        None => true,
-        Some(last) => now.duration_since(last).map_or(true, |since| since >= AUTOMATIC_INTERVAL),
-    }
-}
-
 /// Whether this run may check by itself. Test, scripted and read-only runs and the developer
 /// override don't, unless `NAVIA_CHECK_UPDATES=1` forces it.
 pub fn automatic_check_allowed(test_run: bool) -> bool {
@@ -125,16 +116,6 @@ mod tests {
         assert!(compare(r#"{"message":"Not Found"}"#, "0.1.1").is_err());
         assert!(compare("<html>", "0.1.1").is_err());
         assert!(compare(REPLY, "?").is_err());
-    }
-
-    #[test]
-    fn the_automatic_check_runs_once_a_day() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
-        assert!(automatic_check_due(None, now));
-        assert!(!automatic_check_due(Some(now - Duration::from_secs(60)), now));
-        assert!(!automatic_check_due(Some(now - AUTOMATIC_INTERVAL + Duration::from_secs(1)), now));
-        assert!(automatic_check_due(Some(now - AUTOMATIC_INTERVAL), now));
-        assert!(automatic_check_due(Some(now + Duration::from_secs(3600)), now));
     }
 
     #[tokio::test(flavor = "multi_thread")]

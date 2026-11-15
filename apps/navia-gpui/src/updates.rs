@@ -143,26 +143,34 @@ pub fn run_installer_hooks() {
         .run();
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
 impl crate::shell::Shell {
-    /// Checks for updates once at launch when enabled. Windows checks only with a feed. Elsewhere
-    /// it's at most once a day, and never in test, scripted, read-only or developer runs.
-    pub fn check_updates_at_launch(&mut self, cx: &mut gpui::Context<Self>) {
-        if !self.prefs.check_updates {
-            return;
-        }
+    /// Checks at launch and then every `UPDATE_CHECK_INTERVAL` while the setting is on.
+    pub fn start_update_checks(&mut self, cx: &mut gpui::Context<Self>) {
+        use navia_core::updates::{UPDATE_CHECK_INTERVAL, automatic_check_allowed};
         if cfg!(target_os = "windows") {
-            if feed().is_some() {
+            if feed().is_none() {
+                return;
+            }
+            if self.prefs.check_updates {
                 self.check_for_updates(cx);
             }
+        } else if automatic_check_allowed(self.sample_mode || crate::core_library::read_only_run()) {
+            self.automatic_update_check(cx);
+        } else {
             return;
         }
-        use navia_core::updates::{automatic_check_allowed, automatic_check_due};
-        let last = self.prefs.update_checked_at.map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
-        if automatic_check_allowed(self.sample_mode || crate::core_library::read_only_run()) && automatic_check_due(last, std::time::SystemTime::now()) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(UPDATE_CHECK_INTERVAL).await;
+            if this.update(cx, |this, cx| this.automatic_update_check(cx)).is_err() {
+                return;
+            }
+        })
+        .detach();
+    }
+
+    /// Skipped while a downloaded update waits for a restart.
+    fn automatic_update_check(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.prefs.check_updates && !matches!(self.update_status, UpdateStatus::Checking | UpdateStatus::Ready) {
             self.run_update_check(true, cx);
         }
     }
@@ -193,7 +201,7 @@ impl crate::shell::Shell {
         self.run_update_check(false, cx);
     }
 
-    /// An automatic check stays quiet until it finds something: no "Checking…", no error.
+    /// An automatic check stays quiet unless it finds a newer version than the one shown.
     fn run_update_check(&mut self, automatic: bool, cx: &mut gpui::Context<Self>) {
         if !automatic {
             self.update_status = UpdateStatus::Checking;
@@ -203,12 +211,8 @@ impl crate::shell::Shell {
         cx.spawn(async move |this, cx| {
             let status = task.await;
             let _ = this.update(cx, |this, cx| {
-                if !matches!(status, UpdateStatus::Failed(_)) {
-                    this.prefs.update_checked_at = Some(unix_now());
-                    this.prefs.save();
-                }
-                let found = matches!(status, UpdateStatus::Available { .. });
-                if !automatic || (found && this.update_status == UpdateStatus::Idle) {
+                let found = matches!(status, UpdateStatus::Available { .. } | UpdateStatus::Ready);
+                if !automatic || (found && this.update_status != status && this.update_status != UpdateStatus::Checking) {
                     this.update_status = status;
                 }
                 cx.notify();

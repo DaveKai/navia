@@ -103,8 +103,6 @@ pub struct Prefs {
     pub close_to_tray: bool,
     /// Check for updates automatically. On by default.
     pub check_updates: bool,
-    /// When Navia last asked GitHub for the latest release, in Unix seconds.
-    pub update_checked_at: Option<u64>,
     /// Albums and Artists show the split view instead of the grid.
     pub album_split: bool,
     pub artist_split: bool,
@@ -121,7 +119,7 @@ pub enum DiscordArt {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { mode: PlayerMode::Dock, view: DockView::Artwork, sidebar_open: true, zoom: 100, accent: 0x5a93f5, volume: 80.0, muted: false, translucent: None, system_title_bar: false, dock_width: crate::theme::size::DOCK_W, sidebar_width: crate::theme::size::SIDEBAR_W, private_mode: false, share_listening: false, listeners_control: false, spotify_friends: Vec::new(), lanyard_address: String::new(), lyric_blur: true, between_songs: BetweenSongs::Gapless, crossfade_s: 6, output_device: None, sidebar_orders: Default::default(), columns: [true, true, false, false, false], autoplay: true, shuffle_style: Default::default(), playlist_sorts: Default::default(), scrobble_choices: Default::default(), discord_status: false, discord_art: DiscordArt::MatchPublic, discord_public_address: String::new(), discord_covers_from: Default::default(), library_sync: true, language: None, mini_size: None, mini_at: None, mini_hint_seen: false, mini_on_minimize: false, close_to_tray: true, check_updates: true, update_checked_at: None, album_split: false, artist_split: false }
+        Self { mode: PlayerMode::Dock, view: DockView::Artwork, sidebar_open: true, zoom: 100, accent: 0x5a93f5, volume: 80.0, muted: false, translucent: None, system_title_bar: false, dock_width: crate::theme::size::DOCK_W, sidebar_width: crate::theme::size::SIDEBAR_W, private_mode: false, share_listening: false, listeners_control: false, spotify_friends: Vec::new(), lanyard_address: String::new(), lyric_blur: true, between_songs: BetweenSongs::Gapless, crossfade_s: 6, output_device: None, sidebar_orders: Default::default(), columns: [true, true, false, false, false], autoplay: true, shuffle_style: Default::default(), playlist_sorts: Default::default(), scrobble_choices: Default::default(), discord_status: false, discord_art: DiscordArt::MatchPublic, discord_public_address: String::new(), discord_covers_from: Default::default(), library_sync: true, language: None, mini_size: None, mini_at: None, mini_hint_seen: false, mini_on_minimize: false, close_to_tray: true, check_updates: true, album_split: false, artist_split: false }
     }
 }
 
@@ -296,7 +294,6 @@ impl Prefs {
         prefs.mini_on_minimize = value.get("mini_on_minimize").and_then(Value::as_bool).unwrap_or(false);
         prefs.close_to_tray = value.get("close_to_tray").and_then(Value::as_bool).unwrap_or(true);
         prefs.check_updates = value.get("check_updates").and_then(Value::as_bool).unwrap_or(true);
-        prefs.update_checked_at = value.get("update_checked_at").and_then(Value::as_u64);
         prefs.album_split = value.get("album_layout").and_then(Value::as_str) == Some("split");
         prefs.artist_split = value.get("artist_layout").and_then(Value::as_str) == Some("split");
         // Drop the legacy "generated_covers" key from the file.
@@ -367,7 +364,6 @@ impl Prefs {
             "mini_on_minimize": self.mini_on_minimize,
             "close_to_tray": self.close_to_tray,
             "check_updates": self.check_updates,
-            "update_checked_at": self.update_checked_at,
             "album_layout": if self.album_split { "split" } else { "grid" },
             "artist_layout": if self.artist_split { "split" } else { "grid" },
         });

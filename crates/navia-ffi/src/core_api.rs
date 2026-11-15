@@ -235,12 +235,16 @@ pub fn check_latest_release(running_version: String) -> ReleaseCheckRow {
     }
 }
 
-/// Whether the automatic update check should run now. `last_checked` is in Unix seconds.
+/// Whether this run may check for updates by itself.
 #[uniffi::export]
-pub fn automatic_update_check_due(test_run: bool, last_checked: Option<u64>) -> bool {
-    use navia_core::updates::{automatic_check_allowed, automatic_check_due};
-    let last = last_checked.map(|secs| std::time::UNIX_EPOCH + Duration::from_secs(secs));
-    automatic_check_allowed(test_run) && automatic_check_due(last, std::time::SystemTime::now())
+pub fn automatic_update_check_allowed(test_run: bool) -> bool {
+    navia_core::updates::automatic_check_allowed(test_run)
+}
+
+/// Seconds between automatic update checks after the one at launch.
+#[uniffi::export]
+pub fn update_check_interval_secs() -> u64 {
+    navia_core::updates::UPDATE_CHECK_INTERVAL.as_secs()
 }
 
 /// A client's display name. Navia's own is always "Navia".
