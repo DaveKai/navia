@@ -1,7 +1,7 @@
 import SwiftUI
 import NaviaCoreFFI
 
-private let licenseURL = URL(string: "https://github.com/DaveKai/navia/blob/main/LICENSE")!
+private let licenseURL = URL(string: "https://github.com/davekai/navia/blob/main/LICENSE")!
 
 /// Every Settings section. Rows the Mac can't back yet are disabled and say why.
 struct SettingsPage: View {
